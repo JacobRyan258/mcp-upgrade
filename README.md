@@ -230,7 +230,13 @@ unexpected failures throw `InternalScannerError` (both exported).
 
 Use `scan()` when a consumer also needs the verbose trace and comment-only
 match records. `isScanReport(value)` and `assertScanReport(value)` validate JSON
-at runtime before a hosted service or another process trusts it. The root
+at runtime before a hosted service or another process trusts it.
+
+Every path inside `findings[]` and `files[]` is repository-relative POSIX. The
+one field that echoes what the caller passed is `repository.root` — so a service
+that scans an uploaded copy in a temporary directory should pass a relative
+`path` with an explicit `cwd`, or overwrite `repository.root` before returning
+the report, rather than exposing its own server-side directory layout. The root
 package deliberately does not export rule implementations, CLI adapters,
 reporters, filesystem records, or test hooks. In server environments, pass
 `cwd` explicitly so relative paths do not depend on process-wide state.
