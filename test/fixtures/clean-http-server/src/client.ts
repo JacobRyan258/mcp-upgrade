@@ -1,0 +1,19 @@
+/** Builds a spec-conformant Streamable HTTP request for a tool call. */
+export async function callTool(endpoint: string, name: string, args: unknown): Promise<Response> {
+  return fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+      'MCP-Protocol-Version': '2026-07-28',
+      'Mcp-Method': 'tools/call',
+      'Mcp-Name': name,
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name, arguments: args },
+    }),
+  });
+}

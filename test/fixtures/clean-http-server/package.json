@@ -1,0 +1,9 @@
+{
+  "name": "clean-http-server",
+  "version": "2.0.0",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "express": "^5.1.0"
+  }
+}

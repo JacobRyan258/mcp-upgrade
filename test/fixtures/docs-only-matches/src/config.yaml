@@ -1,0 +1,8 @@
+# Historical deployment notes.
+# We used to set sessionAffinity: ClientIP here for MCP sticky sessions.
+# stickySessions: true
+service:
+  name: docs-only-matches
+  # The url below contains a # character inside a quoted string, which must not
+  # be treated as starting a comment.
+  docs: "https://modelcontextprotocol.io/specification/draft#overview"

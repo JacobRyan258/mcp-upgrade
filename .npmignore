@@ -1,0 +1,11 @@
+# Belt-and-braces alongside package.json "files".
+src/
+test/
+scripts/
+docs/implementation-plan.md
+.github/
+*.tsbuildinfo
+*.tgz
+eslint.config.js
+vitest.config.ts
+tsconfig*.json

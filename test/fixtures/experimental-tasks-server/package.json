@@ -1,0 +1,8 @@
+{
+  "name": "experimental-tasks-server",
+  "version": "0.4.0",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.22.0"
+  }
+}

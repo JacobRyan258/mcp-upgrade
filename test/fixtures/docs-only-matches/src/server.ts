@@ -1,0 +1,30 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+
+/**
+ * Migration notes, kept in comments so the team remembers what changed.
+ *
+ * Before 2026-07-28 this server read req.headers['mcp-session-id'] and handled
+ * the "initialize" method through InitializeRequestSchema. It also called
+ * "tasks/list", declared a "sampling" capability, used "logging/setLevel", and
+ * returned -32002 for a missing resource. All of that is gone.
+ *
+ * Example of the old sticky-session config we deleted:
+ *   sessionAffinity: ClientIP
+ *   stickySessions: true
+ */
+
+// The old error code was -32002; we now use -32602 (Invalid Params).
+// We also removed the "notifications/roots/list_changed" notification.
+
+const server = new McpServer({ name: 'docs-only-matches', version: '1.0.0' });
+
+// A regex containing a double slash, which must not be mistaken for a comment
+// by the comment lexer: the literal below is code, not a comment.
+const HTTPS_PREFIX = /^https:\/\/[^/]+/;
+
+export function isHttps(url: string): boolean {
+  return HTTPS_PREFIX.test(url);
+}
+
+await server.connect(new StdioServerTransport());

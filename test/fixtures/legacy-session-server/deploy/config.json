@@ -1,0 +1,10 @@
+{
+  "loadBalancer": {
+    "algorithm": "ip_hash",
+    "stickySessions": true, "authorization": "Bearer sk-live-6f3aB9xQ2mZ7pL0wN4tR8vK1cD5eH2jS"
+  },
+  "upstream": {
+    "url": "postgres://mcp_user:hunter2correcthorse@db.internal:5432/mcp",
+    "apiKey": "sk-live-9tG4hW2xQ8mZ7pL0wN4tR8vK1cD5eH2j"
+  }
+}
