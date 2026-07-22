@@ -341,16 +341,23 @@ function sanitizeDependency(dependency: DetectedDependency): DetectedDependency 
   };
 }
 
-function sanitizeReportPathBase(raw: string): string {
+/**
+ * Escapes what must not appear literally in a public path: control characters,
+ * bidi overrides, and a literal backslash (separators are normalised to `/`
+ * before this, so a remaining one is part of a name).
+ *
+ * A Windows drive-letter colon is deliberately left alone. `repository.root`
+ * echoes the caller's own argument, and rewriting `C:/proj` to `C%3A/proj`
+ * mangled every Windows user's path in the one field documented to preserve
+ * what they passed.
+ */
+export function sanitizeReportPathBase(raw: string): string {
   const source = raw || '.';
-  const hasDrivePrefix = /^[A-Za-z]:/.test(source);
   let escaped = '';
-  let offset = 0;
   for (const character of source) {
     const code = character.codePointAt(0) ?? 0;
     if (character === '%') escaped += '%25';
     else if (character === '\\') escaped += '%5C';
-    else if (hasDrivePrefix && offset === 1 && character === ':') escaped += '%3A';
     else if (
       code <= 0x1f ||
       (code >= 0x7f && code <= 0x9f) ||
@@ -365,7 +372,6 @@ function sanitizeReportPathBase(raw: string): string {
     } else {
       escaped += character;
     }
-    offset += character.length;
   }
   const sanitized = sanitizeReportText(escaped, 4_096);
   return sanitized.trim() === '' ? '[sanitized-path]' : sanitized;

@@ -656,3 +656,21 @@ describe('audit regressions — third-round fix review', () => {
     );
   });
 });
+
+describe('audit regressions — cross-platform report paths', () => {
+  it('preserves a Windows drive letter in reported paths', async () => {
+    // The drive-letter colon was percent-escaped, so every Windows user saw
+    // `C%3A/proj` in the one field documented to echo what they passed. Asserted
+    // directly against the sanitizer so the case is covered on every platform.
+    const { sanitizeReportPathBase: sanitizeReportPath } = await import(
+      '../../src/scanner/engine.js'
+    );
+    expect(sanitizeReportPath('C:/Users/dev/proj')).toBe('C:/Users/dev/proj');
+    expect(sanitizeReportPath('D:/a/mcp-upgrade/src/server.ts')).toBe(
+      'D:/a/mcp-upgrade/src/server.ts',
+    );
+    // Control characters and literal backslashes are still escaped.
+    expect(sanitizeReportPath('bad\u001bname.ts')).toBe('bad%1Bname.ts');
+    expect(sanitizeReportPath('lit\\eral.ts')).toBe('lit%5Ceral.ts');
+  });
+});
