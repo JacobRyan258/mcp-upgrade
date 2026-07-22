@@ -5,7 +5,7 @@ import {
   SOURCES,
 } from '../../constants.js';
 import type { AppsReadiness, Finding, ScanContext, ScannerRule } from '../../types.js';
-import { buildFinding, dedupeByLocation, filesFor, matches } from './helpers.js';
+import { buildFinding, dedupeByLocation, fileHasMcpSignal, filesFor, matches } from './helpers.js';
 
 /**
  * Group 8 — MCP Apps readiness. Informational only.
@@ -130,6 +130,13 @@ export const appsReadinessRule: ScannerRule = {
   async scan(context: ScanContext): Promise<Finding[]> {
     const findings: Finding[] = [];
 
+    // Apps readiness only has meaning for an MCP implementation. Exact Apps
+    // tokens also occur in documentation generators, migration scanners, and
+    // protocol constant registries, where treating them as adoption signals is
+    // misleading. Repository classification requires executable MCP behavior,
+    // an official MCP import, or an MCP dependency.
+    if (!context.repository.isLikelyMcpServer) return findings;
+
     const remediation =
       'MCP Apps is optional; nothing here is required for the 2026-07-28 migration. If you do want ' +
       'to adopt it: declare the ' +
@@ -141,6 +148,12 @@ export const appsReadinessRule: ScannerRule = {
 
     for (const file of filesFor(this, context)) {
       for (const signal of APP_SIGNALS) {
+        if (
+          signal.strength !== 'explicit' &&
+          !fileHasMcpSignal(file)
+        ) {
+          continue;
+        }
         for (const { hit } of matches(context, this, file, signal.pattern)) {
           findings.push(
             buildFinding(this, hit, {

@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { compareCodeUnits } from '../../src/order.js';
 import { renderJsonReport } from '../../src/reporters/json.js';
 import { computeReadiness } from '../../src/scanner/scoring.js';
 import { estimateEffort } from '../../src/scanner/effort.js';
@@ -12,6 +13,7 @@ import {
   toPosix,
 } from '../../src/scanner/discovery.js';
 import { lexCommentsJsonc, lexCommentsYaml } from '../../src/scanner/ast.js';
+import { ALL_RULES } from '../../src/scanner/rules/index.js';
 import { fixture, reportFor, withTempProject } from '../helpers.js';
 import type { Finding } from '../../src/types.js';
 
@@ -58,15 +60,15 @@ describe('determinism', () => {
       expect(rank[prev.level]).toBeLessThanOrEqual(rank[curr.level]);
       if (prev.level !== curr.level) continue;
       if (prev.category !== curr.category) {
-        expect(prev.category.localeCompare(curr.category, 'en')).toBeLessThan(0);
+        expect(compareCodeUnits(prev.category, curr.category)).toBeLessThan(0);
         continue;
       }
       if (prev.ruleId !== curr.ruleId) {
-        expect(prev.ruleId.localeCompare(curr.ruleId, 'en')).toBeLessThan(0);
+        expect(compareCodeUnits(prev.ruleId, curr.ruleId)).toBeLessThan(0);
         continue;
       }
       if (prev.file !== curr.file) {
-        expect(prev.file.localeCompare(curr.file, 'en')).toBeLessThan(0);
+        expect(compareCodeUnits(prev.file, curr.file)).toBeLessThan(0);
         continue;
       }
       expect(prev.line).toBeLessThanOrEqual(curr.line);
@@ -77,6 +79,11 @@ describe('determinism', () => {
     const a = (await reportFor(LEGACY)).summary.readiness.score;
     const b = (await reportFor(LEGACY)).summary.readiness.score;
     expect(a).toBe(b);
+  });
+
+  it('uses locale-independent code-unit ordering for non-ASCII text', () => {
+    const values = ['z.ts', 'ä.ts', 'a.ts', 'Z.ts', 'é.ts'];
+    expect([...values].sort(compareCodeUnits)).toEqual(['Z.ts', 'a.ts', 'z.ts', 'ä.ts', 'é.ts']);
   });
 });
 
@@ -160,6 +167,31 @@ describe('effort estimation', () => {
     expect(estimate.maxHours).toBe(0);
   });
 
+  it('assigns every registered actionable rule to an explicit migration category', () => {
+    const actionable = ALL_RULES.filter((rule) => rule.level !== 'info');
+    const estimate = estimateEffort(
+      actionable.map((rule, index) =>
+        finding({
+          ruleId: rule.id,
+          level: rule.level,
+          confidence: rule.defaultConfidence,
+          file: `src/rule-${index}.ts`,
+        }),
+      ),
+    );
+
+    expect(estimate.items.some((item) => item.key === 'additional-migration')).toBe(false);
+    expect(new Set(estimate.items.flatMap((item) => item.ruleIds))).toEqual(
+      new Set(actionable.map((rule) => rule.id)),
+    );
+  });
+
+  it('does not describe an uncategorized incompatibility as manual review', () => {
+    const estimate = estimateEffort([finding({ ruleId: 'MCP2026-FUTURE-001' })]);
+    expect(estimate.items[0]?.key).toBe('additional-migration');
+    expect(estimate.items[0]?.label).toBe('Additional migration work');
+  });
+
   it('states what the estimate excludes', () => {
     const estimate = estimateEffort([finding()]);
     expect(estimate.excludes.join(' ')).toMatch(/testing/);
@@ -174,7 +206,8 @@ describe('redaction', () => {
     ['password: "hunter2hunter2"', 'hunter2hunter2'],
     ['"client_secret": "s3cr3t-value-here"', 's3cr3t-value-here'],
     ['DATABASE_URL=postgres://user:pw123456@host/db', 'pw123456'],
-    ['-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----', 'MIIabc'],
+    ['-----BEGIN ' + 'RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----', 'MIIabc'],
+    ['-----BEGIN ' + 'EC PRIVATE KEY-----\npartial-key-material', 'partial-key-material'],
     ['token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdef', 'eyJhbGciOiJIUzI1NiJ9'],
     ['ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345', 'ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345'],
   ])('redacts %s', (input, secret) => {

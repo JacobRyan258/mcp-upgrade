@@ -2,6 +2,10 @@ node_modules/
 dist/
 coverage/
 *.tgz
+.env
+.env.*
+!.env.example
+.npmrc
 .DS_Store
 *.log
 .vitest/

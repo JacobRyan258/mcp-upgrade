@@ -81,7 +81,9 @@ describe('lifecycle handler gating', () => {
   it('still flags setRequestHandler("initialize") anywhere', async () => {
     await withTempProject(
       {
-        'src/server.ts': "server.setRequestHandler('initialize', () => ({}));\n",
+        'src/server.ts':
+          "import { Server } from '@modelcontextprotocol/sdk/server/index.js';\n" +
+          "server.setRequestHandler('initialize', () => ({}));\n",
       },
       async (dir) => {
         const report = await reportFor(dir);
@@ -187,7 +189,9 @@ describe('resource error-code classification', () => {
     await withTempProject(
       {
         'src/rate-limit.ts':
+          "import type { McpError as SdkMcpError } from '@modelcontextprotocol/sdk/types.js';\n" +
           'export class McpError extends Error { constructor(public code: number, m: string){ super(m); } }\n' +
+          'export type Marker = SdkMcpError;\n' +
           'export function checkRateLimit(rpm: number): void {\n' +
           "  if (rpm > 100) throw new McpError(-32002, 'rate limited during peak hours');\n" +
           '}\n',
@@ -295,7 +299,7 @@ describe('header rules require MCP evidence', () => {
         'src/client.ts':
           "await fetch('https://example.com/mcp', {\n" +
           "  method: 'POST',\n" +
-          '  body: \'{"jsonrpc":"2.0","method":"tools/call","params":{"name":"x"}}\',\n' +
+          '  body: \'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}}\',\n' +
           '});\n',
       },
       async (dir) => {
@@ -413,7 +417,7 @@ describe('deprecation rules require MCP evidence', () => {
     await withTempProject(
       {
         'package.json': MCP_PKG,
-        'sampling.json': '{ "includeContext": "thisServer" }\n',
+        'mcp-sampling.json': '{ "includeContext": "thisServer" }\n',
       },
       async (dir) => {
         const report = await reportFor(dir);
@@ -505,7 +509,7 @@ describe('tasks rules', () => {
 });
 
 describe('MCP Apps verdict', () => {
-  it('never reports LIKELY_READY from a bare resourceUri property', async () => {
+  it('does not borrow MCP provenance for a bare resourceUri property in another file', async () => {
     await withTempProject(
       {
         'package.json': MCP_PKG,
@@ -513,7 +517,7 @@ describe('MCP Apps verdict', () => {
       },
       async (dir) => {
         const report = await reportFor(dir);
-        expect(report.summary.appsReadiness).toBe('POSSIBLE_CANDIDATE');
+        expect(report.summary.appsReadiness).toBe('NO_SIGNAL');
       },
     );
   });
@@ -535,7 +539,7 @@ describe('YAML and JSON pattern coverage', () => {
   it('detects quoted affinity keys in JSON', async () => {
     await withTempProject(
       {
-        'deploy.json': '{ "affinity": "cookie" }\n',
+        'deploy.json': '{ "service": "mcp-server", "affinity": "cookie" }\n',
       },
       async (dir) => {
         const report = await reportFor(dir);
@@ -549,7 +553,8 @@ describe('discovery hardening', () => {
   it('scans files with uppercase extensions', async () => {
     await withTempProject(
       {
-        'FOO.TS': "const h = 'mcp-session-id';\nexport default h;\n",
+        'FOO.TS':
+          "declare const response: { setHeader(name: string, value: string): void };\nresponse.setHeader('mcp-session-id', 'legacy');\n",
       },
       async (dir) => {
         const report = await reportFor(dir);
@@ -590,7 +595,7 @@ describe('hostile input survival', () => {
     await withTempProject(
       {
         // ~100k-node binary expression chain — a recursive AST walk overflows.
-        'src/minified.js': `var h='mcp-session-id';${'A-a/'.repeat(50000)}1;\n`,
+        'src/minified.js': `response.setHeader('mcp-session-id','legacy');${'A-a/'.repeat(50000)}1;\n`,
       },
       async (dir) => {
         const report = await reportFor(dir);
@@ -617,7 +622,11 @@ describe('hostile input survival', () => {
           ]),
         );
         const report = await reportFor(dir);
-        expect(report.summary.filesScanned).toBe(2);
+        expect(report.summary.filesScanned).toBe(1);
+        expect(report.files.find((file) => file.file === 'src/bad.ts')?.skipped).toBe(
+          'invalid-utf8',
+        );
+        expect(report.scanStatus).toBe('partial');
       },
     );
   });

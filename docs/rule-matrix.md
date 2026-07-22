@@ -10,8 +10,9 @@ published as of 2026-07-22).
 Classification vocabulary:
 
 - **ERROR** — confirmed incompatibility with the target specification.
-- **WARNING** — deprecated or strongly discouraged, still fully functional during
-  the deprecation window. Never described as breaking.
+- **WARNING** — a directly detected, material migration risk that is not a
+  confirmed MUST-level incompatibility. Deprecated-feature warnings state that
+  the feature remains functional during its deprecation window.
 - **REVIEW** — may require migration, not conclusively decidable by static analysis.
 - **INFO** — non-breaking modernisation or product opportunity.
 
@@ -35,13 +36,23 @@ text, not protocol code.
 
 | Rule ID | Level | Confidence | Detects | Official source | Autofix |
 | --- | --- | --- | --- | --- | --- |
-| `MCP2026-SESSION-001` | ERROR | high | Reads/writes of the `Mcp-Session-Id` HTTP header (any casing), including `req.headers['mcp-session-id']`, `res.setHeader('Mcp-Session-Id', …)` and `headers.get('mcp-session-id')` | [Streamable HTTP (draft)](https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http) · [SEP-2567](https://modelcontextprotocol.io/seps/2567-sessionless-mcp) | manual |
-| `MCP2026-SESSION-002` | ERROR | high | MCP transport constructor options that create or track protocol sessions: `sessionIdGenerator`, `onsessioninitialized`, `onsessionclosed` | [SEP-2567](https://modelcontextprotocol.io/seps/2567-sessionless-mcp) | suggested |
+| `MCP2026-SESSION-001` | WARNING / REVIEW | medium / low | Writes of the `Mcp-Session-Id` HTTP header are `WARNING` / medium; reads and other compatibility literals are `REVIEW` / low because the target says servers SHOULD ignore the header and not mint or echo session IDs | [Streamable HTTP (draft)](https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http) · [SEP-2567](https://modelcontextprotocol.io/seps/2567-sessionless-mcp) | manual |
+| `MCP2026-SESSION-002` | ERROR / REVIEW | high / medium | MCP transport constructor options that create or track protocol sessions: `sessionIdGenerator`, `onsessioninitialized`, `onsessionclosed`. Occurrences guarded as legacy-only downgrade to REVIEW. | [SEP-2567](https://modelcontextprotocol.io/seps/2567-sessionless-mcp) | suggested |
 | `MCP2026-SESSION-003` | REVIEW | medium | Session-keyed transport/state maps near MCP code — `Map<string, StreamableHTTPServerTransport>`, `transports[sessionId]`, `sessions[sessionId]` | [SEP-2567](https://modelcontextprotocol.io/seps/2567-sessionless-mcp) | manual |
 | `MCP2026-SESSION-004` | REVIEW | low | Sticky-session / session-affinity infrastructure config in JSON or YAML — `sessionAffinity`, `stickySessions`, `ip_hash`, affinity ingress annotations | [SEP-2567](https://modelcontextprotocol.io/seps/2567-sessionless-mcp) · [RC announcement](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/) | manual |
-| `MCP2026-LIFECYCLE-001` | ERROR | high | The removed initialization handshake: `initialize` / `notifications/initialized` handled as MCP lifecycle methods, `InitializeRequestSchema`, `InitializedNotificationSchema` | [SEP-2575](https://modelcontextprotocol.io/seps/2575-stateless-mcp) · [changelog](https://modelcontextprotocol.io/specification/draft/changelog) | manual |
-| `MCP2026-LIFECYCLE-002` | ERROR | high | Core RPCs removed in the target: `ping`, `resources/subscribe`, `resources/unsubscribe`, their SDK schema constants, and the `capabilities.resources.subscribe` declaration that advertised them | [SEP-2575](https://modelcontextprotocol.io/seps/2575-stateless-mcp) · [changelog](https://modelcontextprotocol.io/specification/draft/changelog) | manual |
-| `MCP2026-LIFECYCLE-003` | ERROR | medium | Removed Streamable HTTP mechanics: the standalone GET SSE endpoint, HTTP DELETE session termination, and `Last-Event-ID` / `eventStore` stream resumability | [Streamable HTTP (draft)](https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http) · [SEP-2575](https://modelcontextprotocol.io/seps/2575-stateless-mcp) | manual |
+| `MCP2026-LIFECYCLE-001` | ERROR / REVIEW | high / medium / low | The removed initialization handshake: `initialize` / `notifications/initialized` handled as MCP lifecycle methods, `InitializeRequestSchema`, `InitializedNotificationSchema`. Legacy-only guards downgrade to REVIEW / medium; ambiguous multiline templates use REVIEW / low. | [SEP-2575](https://modelcontextprotocol.io/seps/2575-stateless-mcp) · [changelog](https://modelcontextprotocol.io/specification/draft/changelog) | manual |
+| `MCP2026-LIFECYCLE-002` | ERROR / REVIEW | high / medium / low | Core RPCs removed in the target: `ping`, `resources/subscribe`, `resources/unsubscribe`, and their SDK schema constants. Legacy-only guards downgrade to REVIEW / medium; ambiguous multiline templates use REVIEW / low. The `capabilities.resources.subscribe` declaration is **retained** in the target with new meaning and is reported at REVIEW / medium only, never as a removal. | [SEP-2575](https://modelcontextprotocol.io/seps/2575-stateless-mcp) · [changelog](https://modelcontextprotocol.io/specification/draft/changelog) | manual |
+| `MCP2026-LIFECYCLE-003` | WARNING / REVIEW | medium / low | Legacy Streamable HTTP mechanics: the standalone GET SSE endpoint and HTTP DELETE session termination are warnings; ambiguous `Last-Event-ID` / `eventStore` use is review-only. Routes that visibly return 405 are excluded. | [Streamable HTTP (draft)](https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http) · [SEP-2575](https://modelcontextprotocol.io/seps/2575-stateless-mcp) | manual |
+
+**`capabilities.resources.subscribe` is retained, not removed.** Only the
+`resources/subscribe` and `resources/unsubscribe` RPCs were removed. The draft
+Resources page still shows `subscribe` in a valid target-era capability example
+and redefines it as "whether the server supports resource-specific update
+notifications for resources requested through subscriptions/listen using the
+`resourceSubscriptions` filter". `MCP2026-LIFECYCLE-002` therefore reports the
+declaration at REVIEW so a human can confirm which mechanism backs it, and its
+remediation never tells a user to drop a capability the target specification
+expects subscribing servers to declare.
 
 **Guidance these rules emit.** Protocol-level sessions and the initialization
 handshake are removed in `2026-07-28`. Requests become self-contained: the protocol
@@ -81,15 +92,17 @@ this group.
 
 | Rule ID | Level | Confidence | Detects | Official source | Autofix |
 | --- | --- | --- | --- | --- | --- |
-| `MCP2026-HEADER-001` | ERROR | medium | Explicit MCP request construction (`fetch`/`axios`/`got` POST of a JSON-RPC MCP body) that omits `Mcp-Method`, where the method and the tool/resource/prompt name are both available at the call site. Downgraded to `REVIEW` when a middleware or header-injecting wrapper is detected in the repository. | [SEP-2243](https://modelcontextprotocol.io/seps/2243-http-standardization) · [Streamable HTTP (draft)](https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http) | suggested |
-| `MCP2026-HEADER-002` | REVIEW | medium | An MCP POST route handler that never reads or validates `Mcp-Method` / `Mcp-Name`, so header/body disagreement cannot be rejected | [SEP-2243](https://modelcontextprotocol.io/seps/2243-http-standardization) | manual |
-| `MCP2026-HEADER-003` | INFO | high | Places where `Mcp-Method` / `Mcp-Name` are already set or validated — reported so a passing repository can be understood | [SEP-2243](https://modelcontextprotocol.io/seps/2243-http-standardization) | none |
+| `MCP2026-HEADER-001` | ERROR / REVIEW | high / low | Explicit MCP request construction (`fetch`/`axios`/`got` POST of a JSON-RPC Request) that omits or visibly mismatches `MCP-Protocol-Version` / `Mcp-Method`, or omits/mismatches `Mcp-Name` when required. Name-bearing methods include `tools/call`, `resources/read`, `prompts/get`, `tasks/get`, `tasks/update`, and `tasks/cancel`; task methods use `params.taskId`. Downgraded to REVIEW / low when a middleware/header wrapper or dynamic value prevents proof. | [SEP-2243](https://modelcontextprotocol.io/seps/2243-http-standardization) · [Streamable HTTP (draft)](https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http) · [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) | suggested |
+| `MCP2026-HEADER-002` | REVIEW | medium | An MCP POST route handler that never visibly validates `MCP-Protocol-Version`, `Mcp-Method`, and applicable `Mcp-Name`, so header/body disagreement cannot be rejected | [Streamable HTTP (draft)](https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http) | manual |
+| `MCP2026-HEADER-003` | INFO | high | Places where `MCP-Protocol-Version`, `Mcp-Method`, or `Mcp-Name` are already referenced; this is an implementation signal, not proof that every path is compliant | [Streamable HTTP (draft)](https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http) | none |
 
-Supporting quotes:
+Supporting requirements:
 
-> "| `Mcp-Method` | `method` | All requests | … | `Mcp-Name` | `params.name` or
-> `params.uri` | `tools/call`, `resources/read`, `prompts/get` requests |" …
-> "These headers are **REQUIRED** for compliance." — draft Streamable HTTP
+The draft Streamable HTTP transport separately requires clients to include
+`MCP-Protocol-Version` on HTTP requests. Its standard request-header table maps
+`Mcp-Method` to every JSON-RPC Request and `Mcp-Name` to requests whose method
+uses a named target. The draft states that those standard headers are required
+for compliance.
 
 > "Servers that process the request body MUST reject requests where the values
 > specified in the headers do not match the values in the request body."
@@ -116,17 +129,22 @@ the TypeScript SDK.
 
 | Rule ID | Level | Confidence | Detects | Official source | Autofix |
 | --- | --- | --- | --- | --- | --- |
-| `MCP2026-ERROR-001` | ERROR | high | `-32002` **emitted** as a resource-not-found error — a throw/return/reject position with resource context nearby (`resources/read`, `uri`, `resource not found`, `ReadResourceRequestSchema`) | [SEP-2164](https://modelcontextprotocol.io/seps/2164-resource-not-found-error) · [Resources (draft)](https://modelcontextprotocol.io/specification/draft/server/resources) | suggested |
+| `MCP2026-ERROR-001` | ERROR / REVIEW | high / medium | `-32002` **emitted** as a resource-not-found error — a throw/return/reject position with resource context nearby (`resources/read`, `uri`, `resource not found`, `ReadResourceRequestSchema`). Legacy-only guarded emissions downgrade to REVIEW. | [SEP-2164](https://modelcontextprotocol.io/seps/2164-resource-not-found-error) · [Resources (draft)](https://modelcontextprotocol.io/specification/draft/server/resources) | suggested |
 | `MCP2026-ERROR-002` | REVIEW | medium | A hardcoded `-32002` whose purpose cannot be determined from context | [SEP-2164](https://modelcontextprotocol.io/seps/2164-resource-not-found-error) | manual |
+
+Client/server asymmetry is deliberate:
+
+- A client scope that visibly accepts both `-32002` and `-32602` is compatible
+  with old and target-era servers and is not flagged.
+- A client comparison or `case` that accepts only `-32002` is REVIEW because it
+  may reject the required target-era `-32602`; it is never asserted to be a
+  server emission.
+- Occurrences flowing through helpers the scanner cannot classify are REVIEW,
+  never ERROR.
+- Proven server emission of `-32002` for resource-not-found is ERROR.
 
 Not flagged, deliberately:
 
-- **Client-side acceptance** of `-32002` (a comparison such as `err.code === -32002`
-  or a `case -32002:`) is correct forward-compatible behaviour and produces no
-  finding. The change is a producer/consumer asymmetry. Acceptance *lists*
-  (`[-32002, -32602].includes(code)`) and occurrences flowing through helpers
-  the scanner cannot classify are reported by `MCP2026-ERROR-002` as REVIEW,
-  never asserted as an emission.
 - Any other valid JSON-RPC error code (`-32700`, `-32600`, `-32601`, `-32602`,
   `-32603`, or implementation-defined `-32000`…`-32019`).
 
@@ -151,10 +169,10 @@ Supporting quotes:
 
 | Rule ID | Level | Confidence | Detects | Official source | Autofix |
 | --- | --- | --- | --- | --- | --- |
-| `MCP2026-TASKS-001` | ERROR | high | Removed task RPCs: `tasks/list`, `tasks/result`, plus `ListTasksRequestSchema` / `GetTaskPayloadRequestSchema` | [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) · [changelog](https://modelcontextprotocol.io/specification/draft/changelog) | manual |
-| `MCP2026-TASKS-002` | ERROR | high | Legacy Tasks capability negotiation: `capabilities.tasks`, `tasks.requests.*`, `tasks.list`, `tasks.cancel`, `experimental.tasks`, and the tool-level `execution.taskSupport` field | [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) | manual |
-| `MCP2026-TASKS-003` | REVIEW | medium | Legacy task augmentation and lifecycle structures: the per-request `task` param, `io.modelcontextprotocol/related-task`, `modelcontextprotocol.io/task`, `notifications/tasks/status`, the renamed `pollInterval`/`ttl` fields, `TaskStore` / `InMemoryTaskStore` / `registerToolTask` / `TaskRequestHandlerExtra`. `statusMessage` and `lastUpdatedAt` are deliberately **not** flagged — SEP-2663 carries both forward unchanged. | [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) · [SEP-1686](https://modelcontextprotocol.io/seps/1686-tasks) | manual |
-| `MCP2026-TASKS-004` | ERROR | high | Task-augmented Sampling and Elicitation: `tasks.requests.sampling.createMessage`, `tasks.requests.elicitation.create`, `createMessageStream`, `elicitInputStream` | [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) · [SEP-2260](https://modelcontextprotocol.io/seps/2260-Require-Server-requests-to-be-associated-with-Client-requests) | manual |
+| `MCP2026-TASKS-001` | ERROR / REVIEW | high / medium | Removed task RPCs: `tasks/list`, `tasks/result`, plus `ListTasksRequestSchema` / `GetTaskPayloadRequestSchema`. Legacy-only guards downgrade to REVIEW. | [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) · [changelog](https://modelcontextprotocol.io/specification/draft/changelog) | manual |
+| `MCP2026-TASKS-002` | ERROR / REVIEW | high / medium | Legacy Tasks capability negotiation: `capabilities.tasks`, `tasks.requests.*`, `tasks.list`, `tasks.cancel`, `experimental.tasks`, and the tool-level `execution.taskSupport` field. Legacy-only guards downgrade to REVIEW. | [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) | manual |
+| `MCP2026-TASKS-003` | REVIEW | medium | Legacy task augmentation and lifecycle structures: the 2025-11-25 per-request `task` param, related-task metadata, `notifications/tasks/status`, renamed `pollInterval` / `ttl` fields and legacy SDK helpers. It also identifies `modelcontextprotocol.io/task`, `notifications/tasks/created`, and `tasks/delete` explicitly as pre-2025 draft artifacts, not 2025-11-25 removals. `statusMessage` and `lastUpdatedAt` are deliberately **not** flagged because SEP-2663 carries both forward unchanged. | [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) · [SEP-1686](https://modelcontextprotocol.io/seps/1686-tasks) | manual |
+| `MCP2026-TASKS-004` | ERROR / REVIEW | high / medium | Task-augmented Sampling and Elicitation: `tasks.requests.sampling.createMessage`, `tasks.requests.elicitation.create`, `createMessageStream`, `elicitInputStream`. Legacy-only guards downgrade to REVIEW. | [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) · [SEP-2260](https://modelcontextprotocol.io/seps/2260-Require-Server-requests-to-be-associated-with-Client-requests) | manual |
 
 **Guidance these rules emit.** Tasks move from an experimental core feature to an
 official extension identified by `io.modelcontextprotocol/tasks`. The client
@@ -187,7 +205,7 @@ Supporting quotes:
 
 | Rule ID | Level | Confidence | Detects | Official source | Autofix |
 | --- | --- | --- | --- | --- | --- |
-| `MCP2026-SAMPLING-001` | WARNING | medium | The `sampling` client capability, `sampling/createMessage`, `CreateMessageRequestSchema`, `server.createMessage(…)`, `requestSampling(…)`, and Sampling schema types (`CreateMessageResult`, `SamplingMessage`, `ModelPreferences`) | [SEP-2577](https://modelcontextprotocol.io/seps/2577-deprecate-roots-sampling-and-logging) · [Sampling (draft)](https://modelcontextprotocol.io/specification/draft/client/sampling) | manual |
+| `MCP2026-SAMPLING-001` | WARNING | high / medium | The `sampling` client capability, `sampling/createMessage`, `CreateMessageRequestSchema`, `server.createMessage(…)`, `requestSampling(…)`, and Sampling schema types (`CreateMessageResult`, `SamplingMessage`, `ModelPreferences`). Direct calls use high confidence; other explicit surfaces use medium. | [SEP-2577](https://modelcontextprotocol.io/seps/2577-deprecate-roots-sampling-and-logging) · [Sampling (draft)](https://modelcontextprotocol.io/specification/draft/client/sampling) | manual |
 | `MCP2026-SAMPLING-002` | WARNING | low | The deprecated `includeContext` values `"thisServer"` and `"allServers"` | [SEP-2596](https://modelcontextprotocol.io/seps/2596-spec-feature-lifecycle-and-deprecation) · [changelog](https://modelcontextprotocol.io/specification/draft/changelog) | suggested |
 
 **Guidance these rules emit.** Sampling is deprecated as of `2026-07-28`, not
@@ -220,8 +238,8 @@ Supporting quotes:
 
 | Rule ID | Level | Confidence | Detects | Official source | Autofix |
 | --- | --- | --- | --- | --- | --- |
-| `MCP2026-ROOTS-001` | WARNING | medium | The `roots` client capability, `roots/list`, `ListRootsRequestSchema`, `server.listRoots(…)`, and Roots schema types (`ListRootsResult`, `RootsCapability`) | [SEP-2577](https://modelcontextprotocol.io/seps/2577-deprecate-roots-sampling-and-logging) · [Roots (draft)](https://modelcontextprotocol.io/specification/draft/client/roots) | manual |
-| `MCP2026-ROOTS-002` | ERROR | high | `notifications/roots/list_changed`, `RootsListChangedNotificationSchema`, `sendRootsListChanged(…)` — **removed**, not merely deprecated | [SEP-2575](https://modelcontextprotocol.io/seps/2575-stateless-mcp) · [changelog](https://modelcontextprotocol.io/specification/draft/changelog) | manual |
+| `MCP2026-ROOTS-001` | WARNING | high / medium | The `roots` client capability, `roots/list`, `ListRootsRequestSchema`, `server.listRoots(…)`, and Roots schema types (`ListRootsResult`, `RootsCapability`). Direct calls use high confidence; other explicit surfaces use medium. | [SEP-2577](https://modelcontextprotocol.io/seps/2577-deprecate-roots-sampling-and-logging) · [Roots (draft)](https://modelcontextprotocol.io/specification/draft/client/roots) | manual |
+| `MCP2026-ROOTS-002` | ERROR / REVIEW | high / medium | `notifications/roots/list_changed`, `RootsListChangedNotificationSchema`, `sendRootsListChanged(…)` — **removed**, not merely deprecated. Legacy-only guards downgrade to REVIEW. | [SEP-2575](https://modelcontextprotocol.io/seps/2575-stateless-mcp) · [changelog](https://modelcontextprotocol.io/specification/draft/changelog) | manual |
 
 **Guidance these rules emit.** Roots remains functional during the deprecation
 window. Prefer explicit tool parameters, resource URIs, server configuration or
@@ -244,8 +262,8 @@ Supporting quotes:
 
 | Rule ID | Level | Confidence | Detects | Official source | Autofix |
 | --- | --- | --- | --- | --- | --- |
-| `MCP2026-LOGGING-001` | WARNING | medium | The `logging` server capability, `notifications/message`, `sendLoggingMessage(…)`, `LoggingMessageNotificationSchema`, `LoggingLevel` | [SEP-2577](https://modelcontextprotocol.io/seps/2577-deprecate-roots-sampling-and-logging) · [Logging (draft)](https://modelcontextprotocol.io/specification/draft/server/utilities/logging) | manual |
-| `MCP2026-LOGGING-002` | ERROR | high | `logging/setLevel`, `SetLevelRequestSchema`, `setLoggingLevel(…)` — **removed**, replaced by the per-request `io.modelcontextprotocol/logLevel` `_meta` field | [SEP-2575](https://modelcontextprotocol.io/seps/2575-stateless-mcp) · [changelog](https://modelcontextprotocol.io/specification/draft/changelog) | manual |
+| `MCP2026-LOGGING-001` | WARNING | high / medium | The `logging` server capability, `notifications/message`, `sendLoggingMessage(…)`, `LoggingMessageNotificationSchema`, `LoggingLevel`. Direct calls use high confidence; other explicit surfaces use medium. | [SEP-2577](https://modelcontextprotocol.io/seps/2577-deprecate-roots-sampling-and-logging) · [Logging (draft)](https://modelcontextprotocol.io/specification/draft/server/utilities/logging) | manual |
+| `MCP2026-LOGGING-002` | ERROR / REVIEW | high / medium | `logging/setLevel`, `SetLevelRequestSchema`, `setLoggingLevel(…)` — **removed**, replaced by the per-request `io.modelcontextprotocol/logLevel` `_meta` field. Legacy-only guards downgrade to REVIEW. | [SEP-2575](https://modelcontextprotocol.io/seps/2575-stateless-mcp) · [changelog](https://modelcontextprotocol.io/specification/draft/changelog) | manual |
 
 **Guidance these rules emit.** Log to `stderr` on stdio, or use OpenTelemetry and
 normal application observability for structured logging — the draft also documents
@@ -276,14 +294,14 @@ Informational only. Emits a repository-level verdict of `LIKELY_READY`,
 
 | Rule ID | Level | Confidence | Detects | Official source | Autofix |
 | --- | --- | --- | --- | --- | --- |
-| `MCP2026-APPS-001` | INFO | varies | UI-producing behaviour associated with MCP tool output: `ui://` resource URIs, the `text/html;profile=mcp-app` MIME type, the `io.modelcontextprotocol/ui` extension identifier, `_meta.ui.resourceUri`, `@modelcontextprotocol/ext-apps` imports, HTML content responses, HTML templates, JSX/TSX UI modules, embedded frontend assets, and existing iframe/sandbox implementations | [SEP-1865](https://modelcontextprotocol.io/seps/1865-mcp-apps-interactive-user-interfaces-for-mcp) · [MCP Apps overview](https://modelcontextprotocol.io/extensions/apps/overview) | none |
+| `MCP2026-APPS-001` | INFO | high / low | UI-producing behaviour associated with MCP tool output: `ui://` resource URIs, the `text/html;profile=mcp-app` MIME type, the `io.modelcontextprotocol/ui` extension identifier, `_meta.ui.resourceUri`, `@modelcontextprotocol/ext-apps` imports, HTML content responses, HTML templates, JSX/TSX UI modules, and existing iframe/sandbox implementations. Explicit MCP Apps signals use high confidence; generic UI candidates use low. | [SEP-1865](https://modelcontextprotocol.io/seps/1865-mcp-apps-interactive-user-interfaces-for-mcp) · [MCP Apps overview](https://modelcontextprotocol.io/extensions/apps/overview) | none |
 
 Verdict rules:
 
 | Verdict | Condition |
 | --- | --- |
 | `LIKELY_READY` | An explicit MCP Apps signal is present: the `io.modelcontextprotocol/ui` identifier, a `ui://` URI, the `text/html;profile=mcp-app` MIME type, `_meta.ui` metadata, or an `@modelcontextprotocol/ext-apps` import. A bare `resourceUri:` property is *not* explicit. |
-| `POSSIBLE_CANDIDATE` | Generic UI-producing signals only — HTML in tool results, HTML templates, JSX/TSX modules, iframes, embedded assets, bare `resourceUri:` properties — or a foreign UI convention such as `text/html+skybridge`, which is reported as needing translation rather than as an MCP App. |
+| `POSSIBLE_CANDIDATE` | Generic UI-producing signals only — HTML in tool results, HTML templates, JSX/TSX modules, iframes, or bare `resourceUri:` properties — or a foreign UI convention such as `text/html+skybridge`, which is reported as needing translation rather than as an MCP App. |
 | `NO_SIGNAL` | The repository looks like an MCP server but shows no UI signal. |
 | `NOT_APPLICABLE` | The repository does not look like an MCP server. |
 
@@ -307,21 +325,54 @@ repository that does not implement it remains fully specification-compliant.
 
 ---
 
+## Group 9 - Target-era wire contract and SDK migration
+
+These rules cover material gaps found during the release audit. They are scoped
+to executable, explicit protocol objects or official SDK entry points; they do
+not infer missing fields from high-level v2 SDK handler results whose wire codec
+adds the target envelope.
+
+| Rule ID | Level | Confidence | Detects | Official source | Autofix |
+| --- | --- | --- | --- | --- | --- |
+| `MCP2026-SDK-001` | ERROR / REVIEW | high / medium | A proven direct `Server` / `McpServer.connect(transport)` serving entry point is ERROR. A legacy monolithic `@modelcontextprotocol/sdk` manifest dependency alone is REVIEW because it may be client-only, tooling, or an intentionally isolated legacy endpoint. | [Official TypeScript SDK v2 migration](https://ts.sdk.modelcontextprotocol.io/v2/migration/support-2026-07-28) | manual |
+| `MCP2026-MRTR-001` | ERROR / REVIEW | high / medium | Direct `roots/list`, `sampling/createMessage`, and `elicitation/create` server requests that must instead be request objects inside `InputRequiredResult.inputRequests`. Ambiguous direction and legacy-only guards downgrade to REVIEW. | [MRTR (draft)](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr) · [SEP-2322](https://modelcontextprotocol.io/seps/2322-MRTR) | manual |
+| `MCP2026-MRTR-002` | ERROR / REVIEW | high / medium | Explicit `input_required` results that provide neither `inputRequests` nor `requestState`, contain invalid request entries, or are returned by a method outside `prompts/get`, `resources/read`, and `tools/call`; dynamic shapes downgrade to REVIEW | [MRTR (draft)](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr) | suggested |
+| `MCP2026-MRTR-003` | REVIEW | medium | Locally decoded `requestState` used in identity, tenant, or authorization branching without visible same-function integrity verification | [MRTR security requirements (draft)](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr) | manual |
+| `MCP2026-ELICITATION-001` | ERROR / REVIEW | high / medium | Removed `notifications/elicitation/complete`, `elicitationId`, URL-elicitation SDK surfaces, and server emission of `-32042`. Legacy-only guards and unproven numeric uses downgrade to REVIEW. | [Elicitation (draft)](https://modelcontextprotocol.io/specification/draft/client/elicitation) · [changelog](https://modelcontextprotocol.io/specification/draft/changelog) | manual |
+| `MCP2026-RESULT-001` | ERROR / REVIEW | high / medium | Raw JSON-RPC results linked to a recognized MCP handler or dispatch case that omit `resultType` are ERROR; unassociated MCP-shaped results require REVIEW; explicit `CreateTaskResult` objects must flatten the required Task fields and are limited to `tools/call` | [Base protocol (draft)](https://modelcontextprotocol.io/specification/draft/basic/index) · [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) | suggested |
+| `MCP2026-META-001` | ERROR / REVIEW | high / medium | Executable raw requests for recognized MCP methods missing `io.modelcontextprotocol/protocolVersion` or `io.modelcontextprotocol/clientCapabilities` in `params._meta` are ERROR; dynamic params require REVIEW | [Base protocol (draft)](https://modelcontextprotocol.io/specification/draft/basic/index) | suggested |
+| `MCP2026-DISCOVERY-001` | REVIEW | high / medium | Explicit discovery results with obsolete top-level `serverInfo` or missing recommended `_meta['io.modelcontextprotocol/serverInfo']`; an extra top-level field alone is not claimed to invalidate the result | [Server discovery (draft)](https://modelcontextprotocol.io/specification/draft/server/discover) | suggested |
+| `MCP2026-CACHE-001` | ERROR / REVIEW | high / medium | Explicit complete discovery/list/read results with missing or invalid `ttlMs` and `cacheScope` are ERROR; dynamic hints require REVIEW | [Caching (draft)](https://modelcontextprotocol.io/specification/draft/server/utilities/caching) · [SEP-2549](https://modelcontextprotocol.io/seps/2549-TTL-for-list-results) | suggested |
+| `MCP2026-ERROR-003` | ERROR / REVIEW | high / medium | Proven server emission of obsolete `-32001`, `-32003`, or `-32004` with the corresponding named target error is ERROR; named declarations of uncertain direction are REVIEW and client comparisons are excluded | [Base protocol error codes (draft)](https://modelcontextprotocol.io/specification/draft/basic/index) · [changelog](https://modelcontextprotocol.io/specification/draft/changelog) | suggested |
+
+Official-source constraints encoded by this group:
+
+- `resultType` is required on target results. Treating an absent value as
+  `complete` is backward-compatible **client** behavior for older servers, not
+  permission for a target server to omit it.
+- Core `InputRequiredResult` is limited to `prompts/get`, `resources/read`, and
+  `tools/call`; `inputRequests` and `requestState` are each optional, but at
+  least one must be present. The client must treat `requestState` as opaque; a server that
+  uses client-returned state must validate it and bind user-specific state to
+  the authenticated user.
+- Complete `server/discover`, list and resource-read results carry cache hints;
+  interim `input_required` results do not.
+- The old `-32000` through `-32019` range remains implementation-defined. The
+  renumbering rule therefore requires the named target error nearby and never
+  treats every occurrence of an old number as invalid.
+
+---
+
 ## Coverage gaps
 
-Changes in `2026-07-28` that this release does **not** detect. They are recorded
-here so the matrix is an honest statement of coverage, and are listed in the README
-under Limitations.
+Only genuine remaining gaps are listed. A clean scan can miss each one as noted.
 
-| Change | Source |
-| --- | --- |
-| Multi Round-Trip Requests: server-initiated requests replaced by `InputRequiredResult` / `inputRequests` / `inputResponses` / `requestState` | [SEP-2322](https://modelcontextprotocol.io/seps/2322-MRTR) |
-| Required `resultType` discriminator on all results | [SEP-2322](https://modelcontextprotocol.io/seps/2322-MRTR) |
-| Required `ttlMs` and `cacheScope` on list and read results (`CacheableResult`) | [SEP-2549](https://modelcontextprotocol.io/seps/2549-TTL-for-list-results) |
-| `subscriptions/listen` adoption (detected only as the removal of what it replaces) | [SEP-2575](https://modelcontextprotocol.io/seps/2575-stateless-mcp) |
-| Removal of `notifications/elicitation/complete`, `elicitationId`, and `-32042` | draft changelog, minor change 11 |
-| Error-code renumbering `-32001`→`-32020`, `-32003`→`-32021`, `-32004`→`-32022` | draft changelog, minor change 12 |
-| Authorization hardening (`iss` validation, `application_type`, credential binding, DCR deprecation) | SEP-2468, SEP-837, SEP-2352, PR #2858 |
-| JSON Schema 2020-12 loosening for `inputSchema` / `outputSchema` | [SEP-2106](https://modelcontextprotocol.io/seps/2106-json-schema-2020-12) |
-| TypeScript SDK v1 → v2 package split (`@modelcontextprotocol/sdk` → `/server`, `/client` and adapter packages, per the announcement; `/core` additionally published on npm) | [Beta SDK announcement](https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/) |
-| Non-JavaScript MCP servers (Python, Go, C#, Java, Rust, PHP) | — |
+| Gap | Classification and reason | Impact / clean-scan risk | Expected future implementation |
+| --- | --- | --- | --- |
+| [Authorization hardening](https://modelcontextprotocol.io/specification/draft/basic/authorization) (`iss`, `application_type`, credential binding, DCR changes) | **Not statically detectable at acceptable confidence** across client code, authorization-server configuration, deployment metadata and runtime redirect flows. | High security impact. A clean scan can miss it. | A specialized authorization audit with role detection, configuration schemas and bounded data flow. |
+| [JSON Schema 2020-12 support](https://modelcontextprotocol.io/specification/draft/basic) for tool schemas | **Valuable but safely deferred.** The specification change primarily permits more schema constructs; existing valid object-root input schemas remain valid. | Medium interoperability impact for custom validators. A clean scan can miss rejection of newly valid schemas. | Detect legacy schema validators, forced object output, and unsafe automatic external `$ref` dereferencing. |
+| [`subscriptions/listen` adoption](https://modelcontextprotocol.io/specification/draft/basic/patterns/subscriptions) | **Valuable but safely deferred.** Removed subscribe/unsubscribe surfaces are detected, but static analysis cannot prove that a particular application requires replacement invalidation behavior. | Medium stale-cache risk. A clean scan can miss a missing replacement. | Correlate removed subscriptions, cache policy and list/read consumers across files. |
+| [MRTR retry consumption](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr) (`inputResponses` and echoed `requestState`) | **Not statically detectable at acceptable confidence** without correlating the initial result, client fulfillment and a later independent retry. | High functional impact. A clean scan can miss a server that emits a valid result but mishandles the retry. | Add bounded cross-file data flow that associates request keys with retry parameters and server-side consumption. |
+| [End-to-end Tasks semantics](https://modelcontextprotocol.io/seps/2663-tasks-extension) | **Valuable but safely deferred.** Rules cover removed legacy surfaces, explicit `CreateTaskResult` shapes and routing headers, but do not prove per-request capability negotiation, durable creation, authorization binding or valid status transitions. | High functional and isolation impact. A clean scan can miss these runtime invariants. | Add a Tasks-specific cross-file analyzer and runtime conformance tests for lifecycle and authorization invariants. |
+| Dynamic custom HTTP routing | **Not statically detectable at acceptable confidence** when route paths, receiver names or raw request dispatch are assembled across files. Common Fastify, Hono, Koa, router and Node HTTP shapes are covered. | Medium transport-migration impact. A clean scan can miss HTTP-only rules when transport remains `unknown`. | Add bounded inter-file call and constant propagation while retaining conservative MCP provenance checks. |
+| Non-JavaScript MCP servers | **Outside the JavaScript/TypeScript scope.** | Potentially complete migration impact. A clean scan can miss Python, Go, C#, Java, Rust or PHP behavior. | Language-specific front ends that emit the same versioned report contract. |

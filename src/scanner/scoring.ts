@@ -1,4 +1,5 @@
 import { SCORE_DISCLAIMER } from '../constants.js';
+import { compareCodeUnits } from '../order.js';
 import type { Finding, ReadinessScore, ScoreDeduction } from '../types.js';
 
 /**
@@ -46,15 +47,13 @@ export function computeReadiness(findings: Finding[]): ReadinessScore {
         finding.level === 'error'
           ? `${finding.confidence}-confidence incompatibility (${finding.ruleId})`
           : finding.level === 'warning'
-            ? `deprecated feature in use (${finding.ruleId})`
+            ? `warning-level migration concern (${finding.ruleId})`
             : `pattern requiring manual review (${finding.ruleId})`,
     });
   }
 
   const deductions = [...byKey.values()].sort(
-    (a, b) =>
-      a.ruleId.localeCompare(b.ruleId, 'en') ||
-      a.file.localeCompare(b.file, 'en'),
+    (a, b) => compareCodeUnits(a.ruleId, b.ruleId) || compareCodeUnits(a.file, b.file),
   );
 
   const total = deductions.reduce((sum, deduction) => sum + deduction.points, 0);
@@ -85,7 +84,7 @@ function buildExplanation(
   }
 
   const parts = [...groups.entries()]
-    .sort(([a], [b]) => a.localeCompare(b, 'en'))
+    .sort(([a], [b]) => compareCodeUnits(a, b))
     .map(([label, group]) => `${group.count} × ${label} = −${group.points}`);
 
   const arithmetic =

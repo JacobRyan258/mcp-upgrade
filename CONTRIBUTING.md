@@ -5,9 +5,15 @@ Thanks for helping make MCP migrations less painful.
 ## Setup
 
 ```bash
-npm install
-npm run verify   # typecheck + lint + test + build
+npm ci
+npm run verify   # typecheck + lint + test + secret check + build
+npm run verify:package
+npm run audit:production
 ```
+
+`verify:package` uses Bash plus standard `tar`, `awk`, `grep`, and `find`
+utilities. On native Windows, run it from Git Bash or WSL; the package CI gate
+runs on Ubuntu.
 
 Useful individually:
 
@@ -32,10 +38,15 @@ A rule's `source` must point at one of:
 - an official specification page (`modelcontextprotocol.io/specification/...`),
 - the official changelog,
 - an official extension page, or
-- a **Final** SEP.
+- an **Accepted** or **Final** SEP.
 
-Blog posts, third-party summaries and SDK source are supporting evidence, not
-justification. If you cannot quote the official text, the rule does not ship.
+An SDK-specific rule may instead cite the official SDK documentation, but only
+for a claim about that SDK's packages, entry points, or wire-version support.
+SDK documentation cannot establish a protocol requirement.
+
+Blog posts, third-party summaries and implementation source are supporting
+evidence, not justification. If the exact claim cannot be located in an
+authoritative source, the rule does not ship.
 
 Add the rule to `docs/rule-matrix.md` in the same pull request, with the
 verbatim quote that supports it.
@@ -54,8 +65,10 @@ code, the MCP Apps MIME type. Add to that table if you resolve a new one.
 
 ### 3. Never call a deprecation a breaking change
 
-`WARNING` means the feature still works. The explanation must say so, and must
-not use removal language. There is a test that enforces this
+For a deprecated-feature `WARNING`, the explanation must say the feature still
+works and must not use removal language. Other warnings may represent a
+directly detected SHOULD-level migration risk. There is a test that enforces
+the deprecation wording
 (`deprecated-features-server > never describes a deprecation as removed or
 breaking`); if you are fighting it, check whether the thing you are describing
 is actually removed — in which case it belongs in its own `ERROR` rule, kept
@@ -90,6 +103,12 @@ belongs in the explanation, not in a confident-sounding assertion.
 7. Update `docs/rule-matrix.md` and the rule table in `README.md`.
 8. Add a `CHANGELOG.md` entry.
 
+The public package entrypoint is intentionally small. New rule helpers,
+reporters, CLI functions and engine test hooks must stay on internal source
+paths rather than being re-exported from `src/index.ts`. Changes to
+`ScanReport` also require updates to `isScanReport()` and the external package
+consumer test.
+
 ## Constraints the scanner must keep
 
 Non-negotiable, and each is covered by a test:
@@ -97,7 +116,7 @@ Non-negotiable, and each is covered by a test:
 - **No network calls** during a scan.
 - **Never execute** scanned code, and never install its dependencies.
 - **No telemetry, analytics or authentication.**
-- **Deterministic output** — the same repository must produce the same findings,
+- **Deterministic output** — the same unchanged repository must produce the same findings,
   in the same order, with the same score, on every run. `generatedAt` is the
   only field permitted to vary.
 - **Redact secrets** from every evidence excerpt. If you add a new way for
@@ -107,8 +126,8 @@ Non-negotiable, and each is covered by a test:
 
 ## Dependencies
 
-Production dependencies are limited to `commander`, `chalk`, `fast-glob` and
-`typescript`. Development adds `vitest`, `tsx`, `eslint` and type packages.
+Production dependencies are limited to `commander`, `chalk` and `typescript`.
+Development adds `vitest`, `tsx`, `eslint` and type packages.
 
 Adding a production dependency needs a discussion first. Explicitly out of
 scope: databases, web frameworks, LLM APIs, telemetry SDKs, authentication, and

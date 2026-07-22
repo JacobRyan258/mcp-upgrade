@@ -1,6 +1,6 @@
 name: False positive / false negative
 description: A rule fired on code it should not have, or missed code it should have caught
-labels: [rule-accuracy]
+labels: [bug]
 body:
   - type: input
     id: rule
@@ -34,7 +34,7 @@ body:
     attributes:
       label: Why the current behaviour is wrong
       description: >
-        If you have it, cite the MCP specification page, changelog entry or SEP
-        that supports your reading. Every rule in this tool must trace to one.
+        If you have it, cite the MCP specification page, changelog entry, SEP or
+        official SDK guide that supports your reading.
     validations:
       required: true

@@ -1,4 +1,5 @@
 import { EFFORT_EXCLUSIONS } from '../constants.js';
+import { compareCodeUnits } from '../order.js';
 import type { EffortEstimate, EffortItem, Finding } from '../types.js';
 
 /**
@@ -57,7 +58,12 @@ const CATEGORIES: EffortCategory[] = [
     minHours: 0.25,
     maxHours: 0.5,
     mode: 'per-file',
-    ruleIds: ['MCP2026-ERROR-001', 'MCP2026-SAMPLING-002'],
+    ruleIds: [
+      'MCP2026-ERROR-001',
+      'MCP2026-ERROR-002',
+      'MCP2026-ERROR-003',
+      'MCP2026-SAMPLING-002',
+    ],
   },
   {
     key: 'tasks-migration',
@@ -96,6 +102,43 @@ const CATEGORIES: EffortCategory[] = [
     mode: 'once',
     ruleIds: ['MCP2026-LOGGING-001', 'MCP2026-LOGGING-002'],
   },
+  {
+    key: 'sdk-v2-migration',
+    label: 'TypeScript SDK v2 migration',
+    minHours: 2,
+    maxHours: 8,
+    mode: 'once',
+    ruleIds: ['MCP2026-SDK-001'],
+  },
+  {
+    key: 'mrtr-migration',
+    label: 'Multi round-trip request migration',
+    minHours: 2,
+    maxHours: 8,
+    mode: 'once',
+    ruleIds: ['MCP2026-MRTR-001', 'MCP2026-MRTR-002', 'MCP2026-MRTR-003'],
+  },
+  {
+    key: 'elicitation-removal',
+    label: 'Elicitation removal',
+    minHours: 1,
+    maxHours: 4,
+    mode: 'once',
+    ruleIds: ['MCP2026-ELICITATION-001'],
+  },
+  {
+    key: 'protocol-shapes',
+    label: 'Protocol request and result shape migration',
+    minHours: 0.5,
+    maxHours: 2,
+    mode: 'per-file',
+    ruleIds: [
+      'MCP2026-RESULT-001',
+      'MCP2026-META-001',
+      'MCP2026-DISCOVERY-001',
+      'MCP2026-CACHE-001',
+    ],
+  },
 ];
 
 /** Anything left over that still needs a human decision. */
@@ -106,6 +149,16 @@ const MANUAL_REVIEW: EffortCategory = {
   maxHours: 1,
   mode: 'per-file',
   ruleIds: ['MCP2026-SESSION-004'],
+};
+
+/** Neutral fallback for a future actionable rule that has not been estimated yet. */
+const ADDITIONAL_MIGRATION: EffortCategory = {
+  key: 'additional-migration',
+  label: 'Additional migration work',
+  minHours: 0.5,
+  maxHours: 2,
+  mode: 'per-file',
+  ruleIds: [],
 };
 
 export function estimateEffort(findings: Finding[]): EffortEstimate {
@@ -120,7 +173,7 @@ export function estimateEffort(findings: Finding[]): EffortEstimate {
   const buckets = new Map<string, { category: EffortCategory; files: Set<string>; rules: Set<string> }>();
 
   for (const finding of actionable) {
-    const category = categoryFor.get(finding.ruleId) ?? MANUAL_REVIEW;
+    const category = categoryFor.get(finding.ruleId) ?? ADDITIONAL_MIGRATION;
     const bucket = buckets.get(category.key) ?? {
       category,
       files: new Set<string>(),
@@ -145,18 +198,18 @@ export function estimateEffort(findings: Finding[]): EffortEstimate {
           : category.label,
       minHours: round(category.minHours * multiplier),
       maxHours: round(category.maxHours * multiplier),
-      ruleIds: [...bucket.rules].sort((a, b) => a.localeCompare(b, 'en')),
-      files: [...bucket.files].sort((a, b) => a.localeCompare(b, 'en')),
+      ruleIds: [...bucket.rules].sort(compareCodeUnits),
+      files: [...bucket.files].sort(compareCodeUnits),
     });
   }
 
-  items.sort((a, b) => a.key.localeCompare(b.key, 'en'));
+  items.sort((a, b) => compareCodeUnits(a.key, b.key));
 
   return {
     items,
     minHours: round(items.reduce((sum, item) => sum + item.minHours, 0)),
     maxHours: round(items.reduce((sum, item) => sum + item.maxHours, 0)),
-    excludes: EFFORT_EXCLUSIONS,
+    excludes: [...EFFORT_EXCLUSIONS],
   };
 }
 

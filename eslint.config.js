@@ -24,9 +24,11 @@ export default tseslint.config(
         'error',
         { prefer: 'type-imports', fixStyle: 'separate-type-imports' },
       ],
+      // CLI entrypoints and verification scripts intentionally own stdout/stderr.
       'no-console': 'off',
       eqeqeq: ['error', 'always', { null: 'ignore' }],
       'prefer-const': 'error',
+      // Redaction must recognize ANSI and control bytes in hostile input.
       'no-control-regex': 'off',
     },
   },

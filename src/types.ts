@@ -12,8 +12,8 @@
 
 /**
  * ERROR   — confirmed incompatibility with the selected target specification.
- * WARNING — deprecated or strongly discouraged feature that still functions
- *           during the compatibility window. Never described as "breaking".
+ * WARNING — directly detected migration risk that is material but is not a
+ *           confirmed MUST-level incompatibility.
  * REVIEW  — suspicious pattern that may require migration but cannot be
  *           conclusively interpreted through static analysis.
  * INFO    — non-breaking modernization or product opportunity.
@@ -99,8 +99,9 @@ export interface DetectedDependency {
 
 export interface RepositoryClassification {
   /**
-   * The scan target as the caller provided it (POSIX separators). Absolute
-   * only when the caller passed an absolute path.
+   * The scan target in the caller's display form (POSIX separators), with
+   * secret-shaped and control-character content sanitized. Absolute only when
+   * the caller passed an absolute path.
    */
   root: string;
   /** True when the target was a single file rather than a directory. */
@@ -164,10 +165,39 @@ export type SkipReason =
   | 'unsupported-extension'
   | 'too-large'
   | 'binary'
+  | 'invalid-utf8'
+  | 'parse-failure'
+  | 'complexity-limit'
   | 'unreadable'
+  | 'unreadable-directory'
   | 'test-path'
+  | 'symlink'
   | 'symlink-outside-root'
+  | 'depth-limit'
+  | 'discovery-limit'
+  | 'root-changed'
   | 'scan-limit';
+
+export type ScanIssueCode =
+  | SkipReason
+  | 'analysis-limit'
+  | 'finding-limit'
+  | 'report-limit';
+
+/** Whether every in-scope supported file was scanned successfully. */
+export type ScanStatus = 'complete' | 'partial';
+
+/** A machine-readable reason why a scan is partial. */
+export interface ScanIssue {
+  code: ScanIssueCode;
+  /** Repository-relative POSIX path, or `.` for the scan root itself. */
+  path: string;
+  message: string;
+  /** Bytes, when a file was inspected far enough to determine its size. */
+  size?: number;
+  /** Number of omitted records, when an output-detail limit was reached. */
+  count?: number;
+}
 
 export interface FileScanResult {
   file: string;
@@ -188,6 +218,8 @@ export interface ScanContext {
   trace: (message: string) => void;
   /** Records a match that was suppressed because it lived inside a comment. */
   noteCommentOnlyMatch: (ruleId: string, file: string, line: number, text: string) => void;
+  /** Marks a rule pass partial because a defensive analysis budget was exhausted. */
+  noteAnalysisLimit: (ruleId: string, file: string, message: string) => void;
 }
 
 export interface TargetSpec {
@@ -236,9 +268,20 @@ export type OutputFormat = 'text' | 'json' | 'checklist';
 
 export type FailOnLevel = 'error' | 'warning' | 'review';
 
+/** Internal identity captured before untrusted filesystem traversal begins. */
+export interface FilesystemIdentity {
+  dev: bigint;
+  ino: bigint;
+  mode: bigint;
+  ctimeNs: bigint;
+  birthtimeNs: bigint;
+}
+
 export interface ResolvedScanOptions {
   /** Absolute, realpath-resolved scan root (the directory, even for single files). */
   rootDir: string;
+  /** Identity of the selected root; every directory and file open must retain it. */
+  rootIdentity: FilesystemIdentity;
   /** Absolute path of a single target file, when scanning one file. */
   singleFilePath: string | null;
   /**
@@ -338,6 +381,10 @@ export interface ScanReport {
     status: TargetStatus;
     baselineVersion: string;
   };
+  /** `partial` means one or more in-scope files could not be scanned. */
+  scanStatus: ScanStatus;
+  /** Deterministic details explaining a partial scan. Empty when complete. */
+  issues: ScanIssue[];
   repository: RepositoryClassification;
   summary: ScanSummary;
   findings: Finding[];
@@ -348,7 +395,7 @@ export interface ScanReport {
 /* Errors                                                                      */
 /* -------------------------------------------------------------------------- */
 
-/** Thrown for invalid CLI arguments or an unreadable target (exit code 2). */
+/** Thrown for invalid CLI arguments or an unreadable target (CLI exit code 2). */
 export class UsageError extends Error {
   override readonly name = 'UsageError';
 }

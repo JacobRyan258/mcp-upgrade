@@ -5,10 +5,12 @@ import { isInComment, offsetToPosition } from '../discovery.js';
 import {
   buildFinding,
   dedupeByLocation,
+  fileHasMcpSignal,
   filesFor,
   hasContextNear,
   identifierLiteral,
-  inMcpContext,
+  isExecutableProtocolLiteral,
+  isMcpSdkIdentifier,
   matches,
   quotedLiteral,
 } from './helpers.js';
@@ -58,11 +60,6 @@ const SAMPLING_IDENTIFIERS = [
  * call expressions (never declarations), and only in files with an MCP signal:
  * `createMessage` and `requestSampling` are ordinary identifiers elsewhere.
  */
-const SAMPLING_CALL_NAMES = [
-  /^(?:server|mcpServer|this)\.createMessage$/,
-  /(^|\.)requestSampling$/,
-];
-
 /**
  * A `capabilities.sampling` path is self-evidencing. A bare top-level
  * `sampling` key is not — tracing configs declare sampling rates — so it only
@@ -73,12 +70,18 @@ const SAMPLING_CALL_NAMES = [
  */
 const SAMPLING_CAPABILITY_PATH = /(^|\.)capabilities\.sampling(\.|$)/;
 const SAMPLING_BARE_PATH = /^sampling$/;
+/**
+ * Vocabulary that makes a bare top-level key a capability declaration rather
+ * than ordinary configuration. Deliberately excludes 'mcp' and
+ * 'modelcontextprotocol': every file in an MCP server contains those in its
+ * import lines, which made the proximity gate vacuous and turned an LLM
+ * wrapper's token-sampling options, a winston logging config and a directory
+ * roots array into asserted capability declarations.
+ */
 const CAPABILITY_CONTEXT_NEEDLES = [
   'capabilities',
   'clientcapabilities',
   'servercapabilities',
-  'mcp',
-  'modelcontextprotocol',
 ];
 
 export const samplingDeprecationRule: ScannerRule = {
@@ -104,11 +107,10 @@ export const samplingDeprecationRule: ScannerRule = {
     for (const file of filesFor(this, context)) {
       const sourceFile = getSourceFile(file);
 
-      // Sampling vocabulary is ordinary vocabulary elsewhere; without an MCP
-      // signal in the repository or file, nothing here is MCP Sampling.
-      if (!inMcpContext(context, file)) continue;
+      const localMcp = fileHasMcpSignal(file);
 
       for (const { hit } of matches(context, this, file, quotedLiteral(SAMPLING_METHOD_LITERALS))) {
+        if (!sourceFile || !isExecutableProtocolLiteral(sourceFile, hit.offset)) continue;
         findings.push(
           buildFinding(this, hit, {
             title: 'Deprecated Sampling method (sampling/createMessage)',
@@ -119,6 +121,7 @@ export const samplingDeprecationRule: ScannerRule = {
       }
 
       for (const { hit } of matches(context, this, file, identifierLiteral(SAMPLING_IDENTIFIERS))) {
+        if (!sourceFile || !isMcpSdkIdentifier(sourceFile, hit.offset)) continue;
         findings.push(
           buildFinding(this, hit, {
             title: `Deprecated Sampling type (${hit.text})`,
@@ -131,14 +134,20 @@ export const samplingDeprecationRule: ScannerRule = {
       if (!sourceFile) continue;
 
       for (const call of collectCalls(sourceFile)) {
-        if (!SAMPLING_CALL_NAMES.some((pattern) => pattern.test(call.name))) continue;
-        if (isInComment(file, call.start)) continue;
+        if (!localMcp) continue;
+        if (
+          !/(?:^|\.)(?:mcpServer|server|mcp|requestContext|context|ctx|extra)\.(?:createMessage|requestSampling)$/.test(
+            call.name,
+          )
+        ) {
+          continue;
+        }
         findings.push(
           buildFinding(
             this,
             { file, offset: call.start, endOffset: call.end, text: call.name },
             {
-              title: 'Server-initiated LLM call through deprecated MCP Sampling',
+              title: 'Deprecated server-initiated Sampling call',
               explanation: DEPRECATION_STATEMENT,
               remediation: MIGRATION_GUIDANCE,
               confidence: 'high',
@@ -148,6 +157,10 @@ export const samplingDeprecationRule: ScannerRule = {
       }
 
       for (const property of collectPropertyPaths(sourceFile)) {
+        // Deliberately gated on the per-file signal, not repository evidence:
+        // in a monorepo a sibling package's generic `capabilities: { roots: {} }`
+        // config must not borrow provenance from an MCP package next to it.
+        if (!localMcp) continue;
         const explicit = SAMPLING_CAPABILITY_PATH.test(property.path);
         const bare =
           SAMPLING_BARE_PATH.test(property.path) &&
@@ -203,6 +216,7 @@ export const includeContextRule: ScannerRule = {
     const pattern = /\bincludeContext['"]?\s*:\s*['"`](thisServer|allServers)['"`]/g;
 
     for (const file of filesFor(this, context)) {
+      if (!fileHasMcpSignal(file)) continue;
       for (const { hit, match } of matches(context, this, file, pattern)) {
         const value = match[1] ?? '';
         findings.push(

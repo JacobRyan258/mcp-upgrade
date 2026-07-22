@@ -3,6 +3,7 @@
  * CLI as a library (tests, embedding) never runs it.
  */
 import { EXIT_INTERNAL } from '../constants.js';
+import { sanitizeReportText } from '../scanner/redaction.js';
 import { main } from './index.js';
 
 main()
@@ -10,6 +11,7 @@ main()
     process.exitCode = code;
   })
   .catch((error: unknown) => {
-    process.stderr.write(`internal error: ${String(error)}\n`);
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`internal error: ${sanitizeReportText(message, 2_000)}\n`);
     process.exitCode = EXIT_INTERNAL;
   });

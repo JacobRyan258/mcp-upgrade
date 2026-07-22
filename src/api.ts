@@ -1,7 +1,7 @@
 import { runScan } from './scanner/engine.js';
-import type { EngineOptions, ScanResult } from './scanner/engine.js';
-import { resolveOptions } from './cli/commands/scan.js';
+import { resolveScanOptions } from './options.js';
 import type { Confidence, ScanReport } from './types.js';
+import { InternalScannerError, UsageError } from './types.js';
 
 /**
  * High-level programmatic API.
@@ -33,28 +33,47 @@ export interface ScanPathOptions {
   verbose?: boolean;
 }
 
+export interface CommentOnlyMatch {
+  ruleId: string;
+  file: string;
+  line: number;
+  text: string;
+}
+
+export interface ScanResult {
+  report: ScanReport;
+  /** Verbose diagnostics. Empty unless `verbose` was requested. */
+  trace: string[];
+  commentOnlyMatches: CommentOnlyMatch[];
+}
+
 /**
  * Scans a path and returns the full structured result: the report plus the
  * verbose trace and comment-only match records when `verbose` is set.
  */
-export async function scan(
-  options: ScanPathOptions,
-  engineOptions: EngineOptions = {},
-): Promise<ScanResult> {
-  const resolved = await resolveOptions(
+export async function scan(options: ScanPathOptions): Promise<ScanResult> {
+  if (typeof options !== 'object' || options === null) {
+    throw new UsageError('scan() requires an options object.');
+  }
+  const resolved = await resolveScanOptions(
     options.path,
     {
       target: options.target,
       includeTests: options.includeTests,
       minConfidence: options.minimumConfidence,
-      ignore: options.ignore?.join(','),
+      ignore: options.ignore,
       verbose: options.verbose,
       // Machine consumers never want ANSI.
       color: false,
     },
     { cwd: options.cwd },
   );
-  return runScan(resolved, engineOptions);
+  try {
+    return await runScan(resolved);
+  } catch (cause) {
+    if (cause instanceof InternalScannerError) throw cause;
+    throw new InternalScannerError('The scanner failed while processing the selected path.', cause);
+  }
 }
 
 /**

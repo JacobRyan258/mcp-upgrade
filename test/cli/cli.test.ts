@@ -49,6 +49,12 @@ describe('help and version', () => {
     expect(stdout).toContain('scan');
   });
 
+  it('prints help through the explicit help command', async () => {
+    const { code, stdout } = await cli('help', 'scan');
+    expect(code).toBe(EXIT_OK);
+    expect(stdout).toContain('Usage: mcp-upgrade scan');
+  });
+
   it('prints scan help with every documented option and exit code', async () => {
     const { code, stdout } = await cli('scan', '--help');
     expect(code).toBe(EXIT_OK);
@@ -103,10 +109,10 @@ describe('exit code 0 — scan completed below the threshold', () => {
     await withTempProject(
       {
         'package.json': JSON.stringify({
-          dependencies: { '@modelcontextprotocol/sdk': '^1.0.0' },
+          dependencies: { '@modelcontextprotocol/server': '^2.0.0-beta.0' },
         }),
         'server.ts': `
-          import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+          import { McpServer } from '@modelcontextprotocol/server';
           export const s = McpServer;
           export const capabilities = { sampling: {}, roots: {} };
         `,
@@ -155,6 +161,13 @@ describe('exit code 1 — findings reached the threshold', () => {
 });
 
 describe('exit code 2 — invalid arguments or unreadable target', () => {
+  it('returns 2 when an option terminator is supplied without a command', async () => {
+    const { code, stdout, stderr } = await cli('--');
+    expect(code).toBe(EXIT_USAGE);
+    expect(stdout).toBe('');
+    expect(stderr).toContain('Usage: mcp-upgrade');
+  });
+
   it('returns 2 for a path that does not exist', async () => {
     const { code, stderr } = await cli('scan', '/definitely/not/a/real/path-xyz');
     expect(code).toBe(EXIT_USAGE);
@@ -239,11 +252,18 @@ describe('exit code 3 — internal scanner failure', () => {
   });
 
   it('reports an internal failure as exit 3 from main', async () => {
-    // A directory that disappears between resolution and scanning is the
-    // realistic route to an internal failure.
-    const io: CliIo = { stdout: () => {}, stderr: () => {} };
+    let stderr = '';
+    const io: CliIo = {
+      stdout: () => {
+        throw new Error('output failed');
+      },
+      stderr: (text) => {
+        stderr += text;
+      },
+    };
     const code = await main(['node', 'mcp-upgrade', 'scan', CLEAN, '--target', '2026-07-28'], io);
-    expect([EXIT_OK, EXIT_INTERNAL]).toContain(code);
+    expect(code).toBe(EXIT_INTERNAL);
+    expect(stderr).toContain('internal error');
   });
 });
 
@@ -269,6 +289,22 @@ describe('output formats', () => {
   it('produces plain text with --no-color', async () => {
     const { stdout } = await cli('scan', LEGACY, '--no-color');
     expect(ANSI_PATTERN.test(stdout)).toBe(false);
+  });
+
+  it('treats NO_COLOR presence as higher priority than FORCE_COLOR', async () => {
+    const previousNoColor = process.env.NO_COLOR;
+    const previousForceColor = process.env.FORCE_COLOR;
+    process.env.NO_COLOR = '';
+    process.env.FORCE_COLOR = '1';
+    try {
+      const { stdout } = await cli('scan', CLEAN);
+      expect(ANSI_PATTERN.test(stdout)).toBe(false);
+    } finally {
+      if (previousNoColor === undefined) delete process.env.NO_COLOR;
+      else process.env.NO_COLOR = previousNoColor;
+      if (previousForceColor === undefined) delete process.env.FORCE_COLOR;
+      else process.env.FORCE_COLOR = previousForceColor;
+    }
   });
 
   it('lists scanned files and rule execution under --verbose', async () => {

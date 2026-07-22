@@ -19,7 +19,7 @@ describe('rule registry', () => {
   it('gives every rule an official MCP source URL', () => {
     for (const rule of ALL_RULES) {
       expect(rule.source.url, rule.id).toMatch(
-        /^https:\/\/(modelcontextprotocol\.io|blog\.modelcontextprotocol\.io)\//,
+        /^https:\/\/(modelcontextprotocol\.io|blog\.modelcontextprotocol\.io|ts\.sdk\.modelcontextprotocol\.io)\//,
       );
       expect(rule.source.title.length, rule.id).toBeGreaterThan(0);
     }
@@ -92,7 +92,9 @@ describe('MCP2026-ERROR-001 / -002 — resource error codes', () => {
       {
         'package.json': JSON.stringify({ dependencies: { '@modelcontextprotocol/sdk': '^1.0.0' } }),
         'client.ts': `
+          import { Client } from '@modelcontextprotocol/sdk/client/index.js';
           export function isResourceMissing(error: { code: number }, uri: string): boolean {
+            void Client;
             void uri;
             // resources/read may answer with either code depending on server age.
             if (error.code === -32602) return true;
@@ -101,6 +103,7 @@ describe('MCP2026-ERROR-001 / -002 — resource error codes', () => {
           export function classify(code: number): string {
             switch (code) {
               case -32002:
+              case -32602:
                 return 'resource-not-found';
               default:
                 return 'other';
@@ -121,8 +124,9 @@ describe('MCP2026-ERROR-001 / -002 — resource error codes', () => {
       {
         'package.json': JSON.stringify({ dependencies: { '@modelcontextprotocol/sdk': '^1.0.0' } }),
         'errors.ts': `
+          import { McpError } from '@modelcontextprotocol/sdk/types.js';
           export function rateLimited() {
-            throw { code: -32002, message: 'Too many requests' };
+            throw new McpError(-32002, 'Too many requests');
           }
         `,
       },
@@ -211,11 +215,22 @@ describe('MCP2026-HEADER-001 — required routing headers', () => {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
+                'MCP-Protocol-Version': '2026-07-28',
                 'Mcp-Method': 'tools/call',
                 'Mcp-Name': name,
               },
               body: JSON.stringify({
-                jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: {} },
+                jsonrpc: '2.0',
+                id: 1,
+                method: 'tools/call',
+                params: {
+                  name,
+                  arguments: {},
+                  _meta: {
+                    'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+                    'io.modelcontextprotocol/clientCapabilities': {},
+                  },
+                },
               }),
             });
           }

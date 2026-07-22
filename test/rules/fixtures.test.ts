@@ -72,7 +72,9 @@ describe('legacy-session-server', () => {
     const findings = findingsFor(report, 'MCP2026-SESSION-001');
 
     expect(findings.length).toBeGreaterThan(0);
-    expect(findings.every((finding) => finding.level === 'error')).toBe(true);
+    expect(findings.every((finding) => finding.level !== 'error')).toBe(true);
+    expect(findings.some((finding) => finding.level === 'warning')).toBe(true);
+    expect(findings.some((finding) => finding.level === 'review')).toBe(true);
     expect(findings.some((finding) => finding.title.includes('reads'))).toBe(true);
     expect(findings.some((finding) => finding.title.includes('writes'))).toBe(true);
   });
@@ -273,7 +275,7 @@ describe('docs-only-matches', () => {
   it('counts the suppressed comment matches so they are not silently lost', async () => {
     const { report, commentOnlyMatches } = await (
       await import('../helpers.js')
-    ).scanFixture(fixture('docs-only-matches'));
+    ).scanFixture(fixture('docs-only-matches'), { verbose: true });
 
     expect(report.summary.commentOnlyMatches).toBeGreaterThan(0);
     expect(commentOnlyMatches.length).toBe(report.summary.commentOnlyMatches);

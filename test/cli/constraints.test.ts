@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { fixture, repoRoot, scanFixture } from '../helpers.js';
 
@@ -51,15 +52,65 @@ function executableText(content: string): string {
     .replace(/\/(?![*/])(?:[^/\\\n[]|\\.|\[(?:[^\]\\]|\\.)*\])+\/[gimsuyd]*/g, '/RE/');
 }
 
+/** Returns module specifiers from static imports, dynamic imports and require calls. */
+function importedModules(content: string): string[] {
+  const source = ts.createSourceFile(
+    'source.ts',
+    content,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const modules: string[] = [];
+
+  const visit = (node: ts.Node): void => {
+    if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteralLike(node.moduleSpecifier)
+    ) {
+      modules.push(node.moduleSpecifier.text);
+    }
+    if (ts.isCallExpression(node) && node.arguments.length > 0) {
+      const first = node.arguments[0];
+      const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
+      const isRequire = ts.isIdentifier(node.expression) && node.expression.text === 'require';
+      if ((isDynamicImport || isRequire) && first && ts.isStringLiteralLike(first)) {
+        modules.push(first.text);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return modules;
+}
+
 describe('the scanner makes no network calls', () => {
   it('never references a network API in executable code', async () => {
+    const networkModules = [
+      'http',
+      'https',
+      'http2',
+      'net',
+      'dgram',
+      'tls',
+      'dns',
+      'dns/promises',
+      'node:http',
+      'node:https',
+      'node:http2',
+      'node:net',
+      'node:dgram',
+      'node:tls',
+      'node:dns',
+      'node:dns/promises',
+    ];
     const forbidden = [
       /\bfetch\s*\(/,
       /\bXMLHttpRequest\b/,
       /\bWebSocket\b/,
-      /\bnode:https?\b/,
-      /\bfrom\s+['"]node:(?:http|https|net|dgram|tls)['"]/,
-      /\brequire\s*\(\s*['"]node:(?:http|https|net|dgram|tls)['"]/,
+      /\bEventSource\b/,
+      /\bsendBeacon\s*\(/,
       /\baxios\b/,
       /\bundici\b/,
       /\bgot\s*\(/,
@@ -70,10 +121,15 @@ describe('the scanner makes no network calls', () => {
       for (const pattern of forbidden) {
         expect(pattern.test(code), `${file} references ${pattern}`).toBe(false);
       }
+      const imports = importedModules(content);
+      expect(
+        imports.filter((specifier) => networkModules.includes(specifier)),
+        `${file} imports a network module`,
+      ).toEqual([]);
     }
   });
 
-  it('declares only the four permitted production dependencies', async () => {
+  it('declares only the permitted production dependencies', async () => {
     const manifest = JSON.parse(
       await fs.readFile(path.join(repoRoot, 'package.json'), 'utf8'),
     ) as { dependencies?: Record<string, string> };
@@ -81,7 +137,6 @@ describe('the scanner makes no network calls', () => {
     expect(Object.keys(manifest.dependencies ?? {}).sort()).toEqual([
       'chalk',
       'commander',
-      'fast-glob',
       'typescript',
     ]);
   });
@@ -89,6 +144,16 @@ describe('the scanner makes no network calls', () => {
 
 describe('the scanner never executes scanned code', () => {
   it('never references an evaluation or process-spawning API', async () => {
+    const executionModules = [
+      'child_process',
+      'module',
+      'vm',
+      'worker_threads',
+      'node:child_process',
+      'node:module',
+      'node:vm',
+      'node:worker_threads',
+    ];
     const forbidden = [
       /\beval\s*\(/,
       /\bnew\s+Function\s*\(/,
@@ -104,6 +169,11 @@ describe('the scanner never executes scanned code', () => {
       for (const pattern of forbidden) {
         expect(pattern.test(code), `${file} references ${pattern}`).toBe(false);
       }
+      const imports = importedModules(content);
+      expect(
+        imports.filter((specifier) => executionModules.includes(specifier)),
+        `${file} imports an execution module`,
+      ).toEqual([]);
     }
   });
 

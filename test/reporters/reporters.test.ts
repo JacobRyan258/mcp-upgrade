@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { compareCodeUnits } from '../../src/order.js';
 import { renderChecklistReport } from '../../src/reporters/checklist.js';
 import { renderJsonReport } from '../../src/reporters/json.js';
 import { renderTextReport } from '../../src/reporters/text.js';
@@ -80,10 +81,11 @@ describe('text reporter', () => {
     expect(warningAt).toBeGreaterThan(errorAt);
   });
 
-  it('describes warnings as still functional, never as breaking', async () => {
+  it('does not mislabel every warning as a deprecation', async () => {
     const report = await reportFor(DEPRECATED);
     const text = renderTextReport(report, { color: false, verbose: false });
-    expect(text).toContain('Still fully functional during the deprecation window');
+    expect(text).toContain('Recommendation-level target behavior or deprecated feature');
+    expect(text).not.toContain('WARNING — 1 finding\n  Deprecated feature.');
   });
 
   it('lists ignored comment-only evidence under --verbose', async () => {
@@ -179,10 +181,10 @@ describe('json reporter', () => {
   it('sorts files and rule counts deterministically', async () => {
     const report = await reportFor(LEGACY);
     const files = report.files.map((entry) => entry.file);
-    expect([...files].sort((a, b) => a.localeCompare(b, 'en'))).toEqual(files);
+    expect([...files].sort(compareCodeUnits)).toEqual(files);
 
     const ruleKeys = Object.keys(report.summary.byRule);
-    expect([...ruleKeys].sort((a, b) => a.localeCompare(b, 'en'))).toEqual(ruleKeys);
+    expect([...ruleKeys].sort(compareCodeUnits)).toEqual(ruleKeys);
   });
 });
 
@@ -198,12 +200,12 @@ describe('checklist reporter', () => {
     expect(markdown).toContain('### References');
   });
 
-  it('separates deprecations and says they are not breaking changes', async () => {
+  it('separates warnings without claiming every warning is a deprecation', async () => {
     const report = await reportFor(DEPRECATED);
     const markdown = renderChecklistReport(report);
 
-    expect(markdown).toContain('### Deprecations');
-    expect(markdown).toContain('are not breaking changes');
+    expect(markdown).toContain('### Warnings');
+    expect(markdown).toContain('recommendation-level target behaviors or deprecated features');
   });
 
   it('contains no ANSI', async () => {

@@ -1,7 +1,7 @@
 # MCP Upgrade Scanner — Implementation Plan
 
-Status: **implemented** (v0.1.0). This document records the design decisions taken
-before coding began, and the research that produced them.
+Status: **release validation in progress** for v0.1.0. This document records the
+implemented architecture and the research that produced it.
 
 ## 1. Purpose
 
@@ -16,21 +16,29 @@ publication on 2026-07-28. Every rule in this tool is therefore traced to one of
 - the official RC announcement,
 - the official draft changelog,
 - a draft specification page, or
-- a **Final** SEP.
+- an **Accepted** or **Final** SEP, or
+- official SDK documentation for a rule limited to SDK package and serving
+  behavior.
 
 The CLI identifies itself as an RC compatibility scanner in every output format.
 
 ## 2. Research performed (2026-07-22)
 
-Primary sources read in full before any rule was written:
+Primary sources revalidated during the 2026-07-22 release audit:
 
 | Source | URL |
 | --- | --- |
 | RC announcement | https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/ |
 | Beta SDK announcement | https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/ |
+| TypeScript SDK v2 target-revision migration | https://ts.sdk.modelcontextprotocol.io/v2/migration/support-2026-07-28 |
 | Draft changelog (authoritative) | https://modelcontextprotocol.io/specification/draft/changelog |
 | Draft Streamable HTTP transport | https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http |
 | Draft base protocol / error codes | https://modelcontextprotocol.io/specification/draft/basic/index |
+| Draft Multi Round-Trip Requests | https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr |
+| Draft server discovery | https://modelcontextprotocol.io/specification/draft/server/discover |
+| Draft caching | https://modelcontextprotocol.io/specification/draft/server/utilities/caching |
+| Draft elicitation | https://modelcontextprotocol.io/specification/draft/client/elicitation |
+| Draft authorization | https://modelcontextprotocol.io/specification/draft/basic/authorization |
 | Draft resources | https://modelcontextprotocol.io/specification/draft/server/resources |
 | Draft roots | https://modelcontextprotocol.io/specification/draft/client/roots |
 | Draft sampling | https://modelcontextprotocol.io/specification/draft/client/sampling |
@@ -47,6 +55,8 @@ Primary sources read in full before any rule was written:
 | SEP-2164 Resource Not Found Error Code | https://modelcontextprotocol.io/seps/2164-resource-not-found-error |
 | SEP-2663 Tasks Extension | https://modelcontextprotocol.io/seps/2663-tasks-extension |
 | SEP-1686 Tasks (legacy baseline) | https://modelcontextprotocol.io/seps/1686-tasks |
+| SEP-2260 Associate server requests with client requests | https://modelcontextprotocol.io/seps/2260-Require-Server-requests-to-be-associated-with-Client-requests |
+| SEP-2549 Cache TTL for list results | https://modelcontextprotocol.io/seps/2549-TTL-for-list-results |
 | SEP-2577 Deprecate Roots, Sampling, Logging | https://modelcontextprotocol.io/seps/2577-deprecate-roots-sampling-and-logging |
 | SEP-2322 Multi Round-Trip Requests | https://modelcontextprotocol.io/seps/2322-MRTR |
 | SEP-2596 Feature Lifecycle | https://modelcontextprotocol.io/seps/2596-spec-feature-lifecycle-and-deprecation |
@@ -89,16 +99,22 @@ removal. Both are corrected above and in `rule-matrix.md`.
 
 ```
 CLI (commander)
-  └─ resolve + validate options ────────────────► UsageError → exit 2
-       └─ discovery      (fast-glob, size/binary guards)
+  └─ core option resolution/validation ─────────► UsageError → exit 2
+       └─ discovery      (bounded walker, size/text/binary guards)
             └─ prepare   (read, line index, comment ranges via ts.Scanner / YAML lexer)
                  └─ classify (package.json, imports, transport, framework)
-                      └─ engine: run rules concurrently, filter by transport +
+                      └─ engine: run rules in stable order, filter by transport +
                         │        file kind + confidence
                         └─ score + effort
                              └─ reporter (text | json | checklist)
                                   └─ exit code from --fail-on threshold
 ```
+
+The ESM-only package entrypoint imports the core option resolver and scan engine
+directly; it does not import Commander or any terminal reporter. The public
+surface is limited to `scan()` / `scanPath()`, report-facing types and errors,
+version metadata, and runtime `ScanReport` validators. CLI adapters, reporters,
+rule implementations and engine test hooks remain internal.
 
 Any unexpected throw inside discovery/classification/rules is wrapped in
 `InternalScannerError` → exit 3, keeping exit 1 exclusively for "findings reached
@@ -108,10 +124,12 @@ the failure threshold".
 
 Hybrid, in four phases, exactly as specified:
 
-1. **Discovery.** `fast-glob` over the resolved root with default ignores. Paths
-   are `realpath`-resolved and re-checked to be inside the root, which rejects
-   traversal through symlinks and malformed globs. Files above 1 MiB, and files
-   whose first 8 KiB contain a NUL byte, are skipped and reported.
+1. **Discovery.** A bounded iterative directory walker enumerates at most 100,000
+   entries and 64 levels, does not follow directory symlinks, and re-checks an
+   opened file descriptor inside the real scan root before reading. Ignore
+   matching uses a small linear `*` / `**` / `?` dialect. Files above 1 MiB,
+   files containing a NUL byte, invalid UTF-8, and files whose syntax cannot be
+   safely tokenized are skipped and reported.
 2. **Classification.** `package.json` dependencies, import specifiers and
    transport-construction sites determine SDK, transport, framework and whether
    MCP HTTP routing goes through an abstraction.
@@ -124,18 +142,33 @@ Hybrid, in four phases, exactly as specified:
    and detecting middleware that may inject headers. No type checker, no program
    construction, no whole-program semantic analysis, no evaluation.
 
+Report construction is independently bounded to 20,000 findings, 25,000 file
+records and 5,000 total issue records, including limit sentinels. Truncation sets
+`scanStatus: "partial"`. `report-limit.count` is the exact number of omitted file
+and issue details. A `finding-limit` has no count because later rules are skipped,
+so the exact number of unseen findings cannot be known. Verbose trace and
+comment-only detail are capped at 2,000 and 1,000 records respectively.
+Each lexical rule additionally stops after 20,000 yielded non-comment matches or
+100,000 inspected matches across the scan. Exhaustion records an
+`analysis-limit` issue at the affected file, marks the scan partial, and omits
+later lexical matches for that rule.
+
 ### 3.2 Comments and documentation
 
-Comment ranges are computed with `ts.createScanner` for TS/JS and a
-quote-aware `#` lexer for YAML. Matches that fall entirely inside a comment range
-are never reported; they are counted and, under `--verbose`, listed as ignored
-evidence. Markdown is not a supported input type, so README examples are never
-read at all.
+Comment ranges come from the TypeScript parser's AST and trivia APIs for TS/JS,
+a string-aware JSONC lexer for JSON, and a quote-aware `#` lexer for YAML.
+Matches that fall entirely inside a comment range are never reported; they are
+counted and, under `--verbose`, listed as ignored evidence. Markdown is not a
+supported input type, so README examples are never read at all. YAML is scanned
+lexically; this release does not perform complete YAML syntax or schema
+validation.
 
 ### 3.3 Determinism
 
-The same repository must produce the same score, the same finding order and the
-same effort estimate on every run.
+The same unchanged repository must produce the same score, the same finding
+order and the same effort estimate on every run. A scan is not a filesystem
+snapshot, so concurrent in-root mutation can change which opened bytes are
+observed without allowing a read outside the selected root.
 
 - Discovery output is sorted by POSIX relative path.
 - Findings are sorted by `(level rank, category, ruleId, file, line, column, title)`.
@@ -147,9 +180,9 @@ same effort estimate on every run.
 Every evidence excerpt passes through `redact()` before it reaches a report:
 Authorization headers, bearer tokens, API-key-shaped assignments, `password`/
 `secret`/`token` assignments, PEM private-key blocks, connection strings with
-credentials, and long high-entropy base64/hex runs are replaced with
-`[REDACTED:<kind>]`. Excerpts are then collapsed to a single line and truncated to
-160 characters.
+credentials, and long mixed-case alphanumeric token segments containing digits
+are replaced with `[REDACTED:<kind>]`. Excerpts are then collapsed to a single
+line and truncated to 160 characters.
 
 ### 3.5 Scoring
 
@@ -187,16 +220,21 @@ URL scanning, live endpoint scanning, SARIF output, automated pull requests,
 LLM-assisted remediation, analytics or telemetry, authentication, billing,
 cross-file semantic analysis, automatic migration patches.
 
-Known detection gaps, listed in the README under Limitations: elicitation changes
-(`notifications/elicitation/complete`, `elicitationId`, `ErrorCode.UrlElicitationRequired`),
-the required `ttlMs`/`cacheScope` fields on list results, the `resultType`
-discriminator, MRTR migration of server-initiated requests, authorization changes,
-and the SDK v1 → v2 package split.
+Known detection gaps, classified in the README and rule matrix: authorization
+hardening across clients and deployment configuration, custom JSON Schema
+validator behavior, proving adoption of `subscriptions/listen`, consuming MRTR
+retries, end-to-end Tasks invariants, dynamic cross-file HTTP routing, and
+non-JavaScript servers. These remain explicit because cross-system runtime
+behavior cannot be reported as a confident static incompatibility from the
+current input scope.
 
 ## 5. Verification
 
-`npm run verify` runs typecheck, lint, unit tests and build. The final validation
-protocol additionally packs a tarball, installs it into a temporary project and
-runs the packaged CLI against every fixture, checking each documented exit code,
-JSON parseability, absence of ANSI in JSON and checklist output, and absence of
-unredacted fixture secrets.
+`npm run verify` runs typecheck, lint, unit tests, the repository secret scan
+and build. `npm run
+verify:package` creates one tarball, inspects that exact archive against an
+allowlist (including entry types and a second secret scan), verifies package and
+scanner versions agree, installs it into a temporary external project, runs the
+direct CLI and local `npx`, imports and typechecks the ESM API, scans every
+fixture, and checks exit codes, machine-format parseability, ANSI isolation,
+determinism and fixture-secret redaction.

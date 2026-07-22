@@ -23,6 +23,13 @@ export async function callTool(name: string, args: unknown) {
     jsonrpc: '2.0',
     id: 1,
     method: 'tools/call',
-    params: { name, arguments: args },
+    params: {
+      name,
+      arguments: args,
+      _meta: {
+        'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+        'io.modelcontextprotocol/clientCapabilities': {},
+      },
+    },
   });
 }

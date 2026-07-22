@@ -23,7 +23,9 @@
   },
   "homepage": "https://github.com/JacobRyan258/mcp-upgrade#readme",
   "type": "module",
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/cli/bin.js"
+  ],
   "bin": {
     "mcp-upgrade": "dist/cli/bin.js"
   },
@@ -32,8 +34,7 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "default": "./dist/index.js"
+      "import": "./dist/index.js"
     },
     "./package.json": "./package.json"
   },
@@ -45,24 +46,28 @@
     "docs/rule-matrix.md"
   ],
   "engines": {
-    "node": ">=20.10.0"
+    "node": ">=22.12.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/make-executable.mjs",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
+    "audit:production": "npm audit --omit=dev",
+    "check:secrets": "node scripts/check-secrets.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "dev": "tsx src/cli/bin.ts",
+    "prepare": "npm run build",
     "prepack": "npm run clean && npm run build",
-    "verify": "npm run typecheck && npm run lint && npm run test && npm run build"
+    "prepublishOnly": "npm run verify && npm run verify:package",
+    "verify": "npm run typecheck && npm run lint && npm run test && npm run check:secrets && npm run build",
+    "verify:package": "bash scripts/verify-package.sh"
   },
   "dependencies": {
     "chalk": "^5.6.2",
     "commander": "^14.0.1",
-    "fast-glob": "^3.3.3",
-    "typescript": "^5.9.3"
+    "typescript": "5.9.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

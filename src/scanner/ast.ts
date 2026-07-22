@@ -19,17 +19,270 @@ import type { FileKind, PreparedFile, Range } from '../types.js';
 export function computeLineStarts(content: string): number[] {
   const starts = [0];
   for (let i = 0; i < content.length; i++) {
-    if (content.charCodeAt(i) === 10 /* \n */) starts.push(i + 1);
+    const code = content.charCodeAt(i);
+    if (code === 13 /* \r */) {
+      if (content.charCodeAt(i + 1) === 10 /* \n */) i++;
+      starts.push(i + 1);
+    } else if (code === 10 /* \n */ || code === 0x2028 || code === 0x2029) {
+      starts.push(i + 1);
+    }
   }
   return starts;
+}
+
+export interface SourcePreflightLimits {
+  maxTokens: number;
+  maxLines: number;
+  maxStructuralLineLength: number;
+}
+
+export interface SourcePreflightResult {
+  lineStarts: number[];
+  linesInspected: number;
+  tokensInspected: number;
+  exceeded: 'line-count' | 'token-count' | 'line-length' | null;
+}
+
+/**
+ * Performs a linear, allocation-bounded lexical pass before TypeScript builds a
+ * parent-linked AST. String, template, regex, JSX-text and ordinary comment
+ * payload is excluded from the structural line-length budget because it
+ * produces at most one AST node regardless of payload size. Comment records are
+ * still counted, and structured JSDoc is charged by size because TypeScript can
+ * expand its tags and type expressions into a large auxiliary AST.
+ */
+export function preflightSource(
+  content: string,
+  ext: string,
+  tokenize: boolean,
+  limits: SourcePreflightLimits,
+): SourcePreflightResult {
+  const lineStarts = boundedLineStarts(content, limits.maxLines);
+  if (lineStarts.exceeded) {
+    return {
+      lineStarts: lineStarts.starts,
+      linesInspected: lineStarts.starts.length,
+      tokensInspected: 0,
+      exceeded: 'line-count',
+    };
+  }
+  if (!tokenize) {
+    return {
+      lineStarts: lineStarts.starts,
+      linesInspected: lineStarts.starts.length,
+      tokensInspected: 0,
+      exceeded: null,
+    };
+  }
+
+  const structuralLengths = new Uint32Array(lineStarts.starts.length);
+  const languageVariant = ext === '.tsx' || ext === '.jsx'
+    ? ts.LanguageVariant.JSX
+    : ts.LanguageVariant.Standard;
+  // Trivia must remain visible here. With skipTrivia=true, hundreds of
+  // thousands of tiny comments cost zero units even though comment-range
+  // collection retains one record for each of them.
+  const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, languageVariant, content);
+  let tokensInspected = 0;
+
+  while (true) {
+    const token = scanner.scan();
+    if (token === ts.SyntaxKind.EndOfFileToken) break;
+    if (isUnchargedTrivia(token)) continue;
+    tokensInspected++;
+    if (tokensInspected > limits.maxTokens) {
+      return {
+        lineStarts: lineStarts.starts,
+        linesInspected: lineStarts.starts.length,
+        tokensInspected,
+        exceeded: 'token-count',
+      };
+    }
+    if (isCommentTrivia(token)) {
+      tokensInspected += jsDocComplexityUnits(
+        content,
+        scanner.getTokenPos(),
+        scanner.getTextPos(),
+        Math.max(0, limits.maxTokens - tokensInspected),
+      );
+      if (tokensInspected > limits.maxTokens) {
+        return {
+          lineStarts: lineStarts.starts,
+          linesInspected: lineStarts.starts.length,
+          tokensInspected,
+          exceeded: 'token-count',
+        };
+      }
+      continue;
+    }
+    if (isPayloadToken(token)) continue;
+    if (
+      addStructuralSpan(
+        structuralLengths,
+        lineStarts.starts,
+        scanner.getTokenPos(),
+        scanner.getTextPos(),
+        limits.maxStructuralLineLength,
+      )
+    ) {
+      return {
+        lineStarts: lineStarts.starts,
+        linesInspected: lineStarts.starts.length,
+        tokensInspected,
+        exceeded: 'line-length',
+      };
+    }
+  }
+
+  return {
+    lineStarts: lineStarts.starts,
+    linesInspected: lineStarts.starts.length,
+    tokensInspected,
+    exceeded: null,
+  };
+}
+
+function isUnchargedTrivia(token: ts.SyntaxKind): boolean {
+  return token === ts.SyntaxKind.WhitespaceTrivia || token === ts.SyntaxKind.NewLineTrivia;
+}
+
+function isCommentTrivia(token: ts.SyntaxKind): boolean {
+  return (
+    token === ts.SyntaxKind.SingleLineCommentTrivia ||
+    token === ts.SyntaxKind.MultiLineCommentTrivia
+  );
+}
+
+/**
+ * TypeScript parses JSDoc tags and type expressions into nodes even though the
+ * outer scanner sees one comment token. Charging one unit per two code units is
+ * deliberately conservative: it bounds that hidden AST without rejecting a
+ * large ordinary block comment or prose-only JSDoc.
+ */
+function jsDocComplexityUnits(
+  content: string,
+  start: number,
+  end: number,
+  remainingBudget: number,
+): number {
+  if (
+    content.charCodeAt(start) !== 0x2f || // /
+    content.charCodeAt(start + 1) !== 0x2a || // *
+    content.charCodeAt(start + 2) !== 0x2a || // * (JSDoc)
+    !containsJsDocTag(content, start + 3, end)
+  ) {
+    return 0;
+  }
+
+  const units = Math.ceil((end - start) / 2);
+  return Math.min(units, remainingBudget + 1);
+}
+
+function containsJsDocTag(content: string, start: number, end: number): boolean {
+  for (let index = start; index < end; index++) {
+    if (content.charCodeAt(index) !== 0x40) continue; // @
+    const previous = content.charCodeAt(index - 1);
+    const next = content.codePointAt(index + 1);
+    const opensTag =
+      index === start ||
+      previous === 0x2a || // *
+      previous === 0x7b || // {
+      previous === 0x20 ||
+      previous === 0x09 ||
+      previous === 0x0a ||
+      previous === 0x0d ||
+      previous === 0x2028 ||
+      previous === 0x2029;
+    if (
+      opensTag &&
+      next !== undefined &&
+      ts.isIdentifierStart(next, ts.ScriptTarget.Latest)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function boundedLineStarts(
+  content: string,
+  maxLines: number,
+): { starts: number[]; exceeded: boolean } {
+  const starts = [0];
+  if (maxLines < 1) return { starts, exceeded: true };
+  for (let i = 0; i < content.length; i++) {
+    const code = content.charCodeAt(i);
+    if (code === 13) {
+      if (content.charCodeAt(i + 1) === 10) i++;
+      starts.push(i + 1);
+    } else if (code === 10 || code === 0x2028 || code === 0x2029) {
+      starts.push(i + 1);
+    } else {
+      continue;
+    }
+    if (starts.length > maxLines) return { starts, exceeded: true };
+  }
+  return { starts, exceeded: false };
+}
+
+function isPayloadToken(token: ts.SyntaxKind): boolean {
+  return (
+    token === ts.SyntaxKind.StringLiteral ||
+    token === ts.SyntaxKind.RegularExpressionLiteral ||
+    token === ts.SyntaxKind.NoSubstitutionTemplateLiteral ||
+    token === ts.SyntaxKind.TemplateHead ||
+    token === ts.SyntaxKind.TemplateMiddle ||
+    token === ts.SyntaxKind.TemplateTail ||
+    token === ts.SyntaxKind.JsxText ||
+    token === ts.SyntaxKind.JsxTextAllWhiteSpaces
+  );
+}
+
+function addStructuralSpan(
+  lengths: Uint32Array,
+  lineStarts: number[],
+  tokenStart: number,
+  tokenEnd: number,
+  limit: number,
+): boolean {
+  let line = lineIndexAt(lineStarts, tokenStart);
+  let offset = tokenStart;
+  while (offset < tokenEnd && line < lineStarts.length) {
+    const nextLine = lineStarts[line + 1] ?? tokenEnd;
+    const segmentEnd = Math.min(tokenEnd, nextLine);
+    const updated = (lengths[line] ?? 0) + Math.max(0, segmentEnd - offset);
+    lengths[line] = updated;
+    if (updated > limit) return true;
+    if (segmentEnd <= offset) break;
+    offset = segmentEnd;
+    line++;
+  }
+  return false;
+}
+
+function lineIndexAt(lineStarts: number[], offset: number): number {
+  let low = 0;
+  let high = lineStarts.length - 1;
+  while (low <= high) {
+    const middle = low + ((high - low) >> 1);
+    if ((lineStarts[middle] as number) <= offset) low = middle + 1;
+    else high = middle - 1;
+  }
+  return Math.max(0, high);
+}
+
+function isLineTerminator(character: string | undefined): boolean {
+  return character === '\n' || character === '\r' || character === '\u2028' || character === '\u2029';
 }
 
 /* -------------------------------------------------------------------------- */
 /* Parsing                                                                     */
 /* -------------------------------------------------------------------------- */
 
-const parseCache = new WeakMap<PreparedFile, ts.SourceFile | null>();
-const contentParseCache = new Map<string, ts.SourceFile>();
+const PARSED_SOURCE = Symbol('mcp-upgrade.parsed-source');
+type PreparedFileWithParseCache = PreparedFile & {
+  [PARSED_SOURCE]?: ts.SourceFile | null;
+};
 
 function scriptKindFor(ext: string): ts.ScriptKind {
   switch (ext) {
@@ -49,21 +302,18 @@ function scriptKindFor(ext: string): ts.ScriptKind {
 }
 
 function parse(content: string, ext: string): ts.SourceFile {
-  const key = `${ext} ${content}`;
-  const cached = contentParseCache.get(key);
-  if (cached) return cached;
-  const sourceFile = ts.createSourceFile(
+  return ts.createSourceFile(
     `source${ext}`,
     content,
     ts.ScriptTarget.Latest,
     /* setParentNodes */ true,
     scriptKindFor(ext),
   );
-  // Bounded so a large scan cannot grow this without limit.
-  if (contentParseCache.size > 512) contentParseCache.clear();
-  contentParseCache.set(key, sourceFile);
-  return sourceFile;
 }
+
+type SourceFileWithDiagnostics = ts.SourceFile & {
+  parseDiagnostics?: readonly ts.Diagnostic[];
+};
 
 /**
  * Returns the parsed source file for TS/JS/JSON inputs, or null for YAML.
@@ -72,17 +322,31 @@ function parse(content: string, ext: string): ts.SourceFile {
  * as in source code.
  */
 export function getSourceFile(file: PreparedFile): ts.SourceFile | null {
-  if (parseCache.has(file)) return parseCache.get(file) ?? null;
+  const cachedFile = file as PreparedFileWithParseCache;
+  if (Object.prototype.hasOwnProperty.call(cachedFile, PARSED_SOURCE)) {
+    return cachedFile[PARSED_SOURCE] ?? null;
+  }
   let result: ts.SourceFile | null = null;
   if (file.kind === 'ts' || file.kind === 'js' || file.kind === 'json') {
     try {
-      result = parse(file.content, file.ext);
+      // package.json is consumed as metadata, so JSONC recovery would make a
+      // malformed manifest look trustworthy. Other JSON retains JSONC support
+      // for standard TypeScript configuration files.
+      if (file.kind === 'json' && /(^|\/)package\.json$/i.test(file.relPath)) {
+        JSON.parse(file.content.replace(/^\uFEFF/, ''));
+      }
+      const parsed = parse(file.content, file.ext) as SourceFileWithDiagnostics;
+      result = (parsed.parseDiagnostics?.length ?? 0) === 0 ? parsed : null;
     } catch {
-      // A file the parser cannot survive falls back to the lexical passes.
       result = null;
     }
   }
-  parseCache.set(file, result);
+  Object.defineProperty(cachedFile, PARSED_SOURCE, {
+    value: result,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
   return result;
 }
 
@@ -111,6 +375,24 @@ export function computeCommentRanges(content: string, kind: FileKind, ext: strin
   }
 }
 
+/**
+ * Computes comments from the same per-file AST later used by rules. `null`
+ * means the parser or AST walk failed, not merely that the file has no comments.
+ */
+export function computeCommentRangesForFile(file: PreparedFile): Range[] | null {
+  switch (file.kind) {
+    case 'ts':
+    case 'js': {
+      const sourceFile = getSourceFile(file);
+      return sourceFile ? commentRangesFromSource(file.content, sourceFile) : null;
+    }
+    case 'json':
+      return getSourceFile(file) ? lexCommentsJsonc(file.content) : null;
+    case 'yaml':
+      return lexCommentsYaml(file.content);
+  }
+}
+
 function commentRangesFromParse(content: string, ext: string): Range[] {
   let sourceFile: ts.SourceFile;
   try {
@@ -119,6 +401,10 @@ function commentRangesFromParse(content: string, ext: string): Range[] {
     return [];
   }
 
+  return commentRangesFromSource(content, sourceFile) ?? [];
+}
+
+function commentRangesFromSource(content: string, sourceFile: ts.SourceFile): Range[] | null {
   const seen = new Set<number>();
   const ranges: Range[] = [];
 
@@ -144,9 +430,7 @@ function commentRangesFromParse(content: string, ext: string): Range[] {
     // The final trailing comment of a file hangs off the EOF token.
     collect(ts.getLeadingCommentRanges(content, sourceFile.endOfFileToken.getFullStart()));
   } catch {
-    // A pathological file must degrade (no comment suppression), never crash
-    // the scan.
-    return [];
+    return null;
   }
 
   ranges.sort((a, b) => a.start - b.start);
@@ -165,7 +449,7 @@ export function lexCommentsJsonc(content: string): Range[] {
     }
     if (ch === '/' && content[i + 1] === '/') {
       const start = i;
-      while (i < content.length && content[i] !== '\n') i++;
+      while (i < content.length && !isLineTerminator(content[i])) i++;
       ranges.push({ start, end: i });
       continue;
     }
@@ -192,7 +476,7 @@ export function lexCommentsYaml(content: string): Range[] {
   let atLineStart = true;
   while (i < content.length) {
     const ch = content[i];
-    if (ch === '\n') {
+    if (isLineTerminator(ch)) {
       atLineStart = true;
       i++;
       continue;
@@ -207,7 +491,7 @@ export function lexCommentsYaml(content: string): Range[] {
       const opensComment = atLineStart || prev === ' ' || prev === '\t';
       if (opensComment) {
         const start = i;
-        while (i < content.length && content[i] !== '\n') i++;
+        while (i < content.length && !isLineTerminator(content[i])) i++;
         ranges.push({ start, end: i });
         continue;
       }
@@ -234,7 +518,7 @@ function skipQuoted(content: string, start: number, quote: string): number {
       }
       return i + 1;
     }
-    if (ch === '\n' && quote === "'") return i;
+    if (isLineTerminator(ch) && quote === "'") return i;
     i++;
   }
   return i;
@@ -284,14 +568,9 @@ export function isInsideMultilineTemplate(
   while (current) {
     if (ts.isTemplateLiteral(current)) {
       const text = content.slice(current.getStart(sourceFile, false), current.getEnd());
-      if (text.includes('\n')) return true;
+      if (/[\r\n\u2028\u2029]/.test(text)) return true;
     }
-    let next: ts.Node | undefined;
-    ts.forEachChild(current, (child) => {
-      if (next) return;
-      if (offset >= child.getStart(sourceFile, true) && offset < child.getEnd()) next = child;
-    });
-    current = next;
+    current = childContainingOffset(current, sourceFile, offset);
   }
   return false;
 }
@@ -301,15 +580,44 @@ export function nodeAt(sourceFile: ts.SourceFile, offset: number): ts.Node | und
   let found: ts.Node | undefined;
   let current: ts.Node | undefined = sourceFile;
   while (current) {
-    let next: ts.Node | undefined;
-    ts.forEachChild(current, (child) => {
-      if (next) return;
-      if (offset >= child.getStart(sourceFile, true) && offset < child.getEnd()) next = child;
-    });
+    const next = childContainingOffset(current, sourceFile, offset);
     if (next) found = next;
     current = next;
   }
   return found;
+}
+
+function childContainingOffset(
+  parent: ts.Node,
+  sourceFile: ts.SourceFile,
+  offset: number,
+): ts.Node | undefined {
+  // Flat/minified files can contain tens of thousands of top-level statements.
+  // Regex-backed rules call nodeAt for many matches, so a linear root scan per
+  // match would be quadratic. SourceFile statements are ordered and non-overlapping.
+  if (ts.isSourceFile(parent)) {
+    let low = 0;
+    let high = parent.statements.length - 1;
+    while (low <= high) {
+      const middle = low + ((high - low) >> 1);
+      const child = parent.statements[middle] as ts.Statement;
+      const start = child.getStart(sourceFile, true);
+      if (offset < start) {
+        high = middle - 1;
+      } else if (offset >= child.getEnd()) {
+        low = middle + 1;
+      } else {
+        return child;
+      }
+    }
+    return undefined;
+  }
+
+  return ts.forEachChild(parent, (child): ts.Node | undefined => {
+    return offset >= child.getStart(sourceFile, true) && offset < child.getEnd()
+      ? child
+      : undefined;
+  });
 }
 
 /** Renders a dotted callee name, e.g. `server.setRequestHandler`. */
@@ -532,8 +840,18 @@ export interface HeaderAccessHit {
   end: number;
 }
 
-const HEADER_WRITE_CALLS = /(^|\.)(setHeader|set|append|writeHead|header)$/;
-const HEADER_READ_CALLS = /(^|\.)(get|getHeader|has)$/;
+const UNAMBIGUOUS_HEADER_WRITES = new Set(['setHeader', 'writeHead']);
+const UNAMBIGUOUS_HEADER_READS = new Set(['getHeader']);
+const GENERIC_HEADER_WRITES = new Set(['set', 'append', 'header']);
+const GENERIC_HEADER_READS = new Set(['get', 'has']);
+
+function headerShapedReceiver(node: ts.CallExpression): boolean {
+  if (!ts.isPropertyAccessExpression(node.expression)) return false;
+  const receiverNode = node.expression.expression;
+  if (ts.isNewExpression(receiverNode) && calleeName(receiverNode) === 'Headers') return true;
+  const receiver = expressionText(receiverNode);
+  return /header/i.test(receiver) || /(^|\.)(?:req|request|res|response)$/.test(receiver);
+}
 
 /**
  * Finds HTTP header reads and writes by name.
@@ -579,12 +897,22 @@ export function collectHeaderAccess(
 
     if (ts.isCallExpression(node)) {
       const name = calleeName(node);
+      const method = name.split('.').at(-1) ?? '';
       const first = node.arguments[0];
       if (!first || !ts.isStringLiteralLike(first)) return;
       const header = first.text.toLowerCase();
       if (!wanted.has(header)) return;
-      if (HEADER_WRITE_CALLS.test(name)) push(header, 'write', node);
-      else if (HEADER_READ_CALLS.test(name)) push(header, 'read', node);
+      if (
+        UNAMBIGUOUS_HEADER_WRITES.has(method) ||
+        (GENERIC_HEADER_WRITES.has(method) && headerShapedReceiver(node))
+      ) {
+        push(header, 'write', node);
+      } else if (
+        UNAMBIGUOUS_HEADER_READS.has(method) ||
+        (GENERIC_HEADER_READS.has(method) && headerShapedReceiver(node))
+      ) {
+        push(header, 'read', node);
+      }
       return;
     }
 

@@ -87,6 +87,21 @@ export function renderTextReport(report: ScanReport, options: TextReportOptions)
       `   Skipped: ${report.summary.filesSkipped}` +
       `   Discovered: ${report.summary.filesDiscovered}`,
   );
+  line(`  Status:    ${report.scanStatus}`);
+  if (report.scanStatus === 'partial') {
+    line(
+      c.yellow(
+        '  PARTIAL: findings and readiness cover only the files that were scanned.',
+      ),
+    );
+    const shown = report.issues.slice(0, 20);
+    for (const issue of shown) {
+      line(c.yellow(`    ${issue.code}: ${issue.path} (${issue.message})`));
+    }
+    if (report.issues.length > shown.length) {
+      line(c.yellow(`    ...and ${report.issues.length - shown.length} more scan issue(s).`));
+    }
+  }
   if (report.summary.commentOnlyMatches > 0) {
     line(
       c.dim(
@@ -99,7 +114,11 @@ export function renderTextReport(report: ScanReport, options: TextReportOptions)
   /* ---- Findings --------------------------------------------------------- */
 
   if (report.findings.length === 0) {
-    line(c.green('No findings.'));
+    line(
+      report.scanStatus === 'complete'
+        ? c.green('No findings.')
+        : c.yellow('No findings in scanned files; the scan is incomplete.'),
+    );
     line();
   } else {
     for (const level of LEVEL_ORDER) {
@@ -136,9 +155,13 @@ export function renderTextReport(report: ScanReport, options: TextReportOptions)
 
   const readiness = report.summary.readiness;
   line(c.bold('Estimated migration readiness'));
-  line(`  ${scoreColor(c, readiness.score)(`${readiness.score} / 100`)}`);
+  const readinessColor = report.scanStatus === 'partial' ? c.yellow : scoreColor(c, readiness.score);
+  line(`  ${readinessColor(`${readiness.score} / 100`)}`);
   line(c.dim(`  ${readiness.explanation}`));
   line(c.dim(`  ${readiness.disclaimer}`));
+  if (report.scanStatus === 'partial') {
+    line(c.yellow('  This estimate is incomplete because at least one in-scope path was skipped.'));
+  }
   line();
 
   const effort = report.summary.effort;
@@ -225,7 +248,7 @@ function describeLevel(level: FindingLevel): string {
     case 'error':
       return '  Confirmed incompatibility with the target specification.';
     case 'warning':
-      return '  Deprecated feature. Still fully functional during the deprecation window.';
+      return '  Recommendation-level target behavior or deprecated feature. Review the source.';
     case 'review':
       return '  May require migration; static analysis cannot decide. Needs a human.';
     case 'info':

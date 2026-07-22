@@ -5,10 +5,14 @@ import { isInComment, offsetToPosition } from '../discovery.js';
 import {
   buildFinding,
   dedupeByLocation,
+  fileHasMcpSignal,
   filesFor,
   hasContextNear,
   identifierLiteral,
-  inMcpContext,
+  isExecutableProtocolLiteral,
+  isIdentifierUse,
+  isMcpSdkIdentifier,
+  legacyEraFindingOverride,
   matches,
   quotedLiteral,
 } from './helpers.js';
@@ -90,14 +94,17 @@ export const removedTaskMethodsRule: ScannerRule = {
     const findings: Finding[] = [];
 
     for (const file of filesFor(this, context)) {
-      // 'tasks/list' is also a perfectly ordinary REST path segment; without
-      // any MCP signal in the repository or file it is not an MCP task RPC.
-      if (!inMcpContext(context, file)) continue;
+      // Exact task method strings still occur in unrelated internal RPCs. Do
+      // not borrow MCP evidence from another package in a monorepo.
+      if (!fileHasMcpSignal(file)) continue;
+      const sourceFile = getSourceFile(file);
 
       for (const removed of REMOVED_TASK_METHODS) {
         for (const { hit } of matches(context, this, file, quotedLiteral([removed.method]))) {
+          if (!sourceFile || !isExecutableProtocolLiteral(sourceFile, hit.offset)) continue;
           findings.push(
             buildFinding(this, hit, {
+              ...legacyEraFindingOverride(file, sourceFile, hit.offset),
               title: `Removed task RPC "${removed.method}"`,
               explanation: `${removed.why} ${MIGRATION_SUMMARY}`,
               remediation: `${removed.replacement} ${SEMANTIC_REVIEW_NOTE}`,
@@ -105,8 +112,10 @@ export const removedTaskMethodsRule: ScannerRule = {
           );
         }
         for (const { hit } of matches(context, this, file, identifierLiteral(removed.identifiers))) {
+          if (!sourceFile || !isMcpSdkIdentifier(sourceFile, hit.offset)) continue;
           findings.push(
             buildFinding(this, hit, {
+              ...legacyEraFindingOverride(file, sourceFile, hit.offset),
               title: `SDK type for the removed task RPC "${removed.method}" (${hit.text})`,
               explanation: `${removed.why} ${MIGRATION_SUMMARY}`,
               remediation: `${removed.replacement} ${SEMANTIC_REVIEW_NOTE}`,
@@ -135,7 +144,22 @@ const LEGACY_CAPABILITY_PATHS = [
   /(^|\.)tasks\.requests(?!\.(?:sampling|elicitation))(\.|$)/,
   /(^|\.)tasks\.(?:list|cancel)$/,
   /(^|\.)experimental\.tasks(\.|$)/,
+  /(^|\.)execution\.taskSupport$/,
 ];
+
+/**
+ * `tasks.list` and `tasks.cancel` are only capability negotiation under a
+ * `capabilities` (or `experimental`) ancestor. Standing alone they are ordinary
+ * nested application data — an MCP to-do server returning
+ * `{ tasks: { list: items, cancel: count } }` from a tool is not declaring a
+ * capability, and asserting ERROR there failed builds on correct code.
+ */
+const BARE_TASK_SUBKEY_PATH = /(^|\.)tasks\.(?:list|cancel)$/;
+
+function isCapabilityDeclarationPath(path: string): boolean {
+  if (!BARE_TASK_SUBKEY_PATH.test(path)) return true;
+  return /(^|\.)(?:capabilities|experimental)\./.test(path);
+}
 
 const LEGACY_CAPABILITY_LITERALS = ['execution.taskSupport', 'taskSupport'];
 
@@ -178,10 +202,12 @@ export const legacyTaskCapabilityRule: ScannerRule = {
 
     for (const file of filesFor(this, context)) {
       const sourceFile = getSourceFile(file);
+      if (!fileHasMcpSignal(file)) continue;
 
       if (sourceFile) {
         for (const property of collectPropertyPaths(sourceFile)) {
           if (!LEGACY_CAPABILITY_PATHS.some((pattern) => pattern.test(property.path))) continue;
+          if (!isCapabilityDeclarationPath(property.path)) continue;
           // Task-augmented sampling/elicitation belongs to MCP2026-TASKS-004.
           if (/tasks\.requests\.(?:sampling|elicitation)(\.|$)/.test(property.path)) continue;
           if (isInComment(file, property.start)) {
@@ -195,6 +221,7 @@ export const legacyTaskCapabilityRule: ScannerRule = {
               { file, offset: property.start, endOffset: property.end, text: property.path },
               {
                 title: `Legacy Tasks capability declaration (${property.path})`,
+                ...legacyEraFindingOverride(file, sourceFile, property.start),
                 explanation,
                 remediation,
               },
@@ -209,8 +236,10 @@ export const legacyTaskCapabilityRule: ScannerRule = {
         file,
         quotedLiteral(LEGACY_CAPABILITY_LITERALS),
       )) {
+        if (!sourceFile || !isExecutableProtocolLiteral(sourceFile, hit.offset)) continue;
         findings.push(
           buildFinding(this, hit, {
+            ...legacyEraFindingOverride(file, sourceFile, hit.offset),
             title: 'Legacy per-tool task support declaration (execution.taskSupport)',
             explanation,
             remediation,
@@ -227,12 +256,15 @@ export const legacyTaskCapabilityRule: ScannerRule = {
 /* MCP2026-TASKS-003 — legacy augmentation and lifecycle structures            */
 /* -------------------------------------------------------------------------- */
 
-const LEGACY_TASK_LITERALS = [
+const BASELINE_TASK_LITERALS = [
   'io.modelcontextprotocol/related-task',
   'modelcontextprotocol.io/related-task',
-  'modelcontextprotocol.io/task',
   'io.modelcontextprotocol/model-immediate-response',
   'notifications/tasks/status',
+];
+
+const PRE_BASELINE_TASK_LITERALS = [
+  'modelcontextprotocol.io/task',
   'notifications/tasks/created',
   'tasks/delete',
 ];
@@ -305,9 +337,12 @@ export const legacyTaskStructuresRule: ScannerRule = {
     for (const file of filesFor(this, context)) {
       // TaskStore, pollInterval and friends are everyday vocabulary in generic
       // task-queue code; without an MCP signal they are not MCP Tasks surface.
-      if (!inMcpContext(context, file)) continue;
+      if (!fileHasMcpSignal(file)) continue;
+      const localMcp = fileHasMcpSignal(file);
+      const sourceFile = getSourceFile(file);
 
-      for (const { hit } of matches(context, this, file, quotedLiteral(LEGACY_TASK_LITERALS))) {
+      for (const { hit } of matches(context, this, file, quotedLiteral(BASELINE_TASK_LITERALS))) {
+        if (!sourceFile || !isExecutableProtocolLiteral(sourceFile, hit.offset)) continue;
         findings.push(
           buildFinding(this, hit, {
             title: `Legacy Tasks protocol literal (${hit.text.slice(1, -1)})`,
@@ -321,8 +356,27 @@ export const legacyTaskStructuresRule: ScannerRule = {
         context,
         this,
         file,
+        quotedLiteral(PRE_BASELINE_TASK_LITERALS),
+      )) {
+        if (!sourceFile || !isExecutableProtocolLiteral(sourceFile, hit.offset)) continue;
+        findings.push(
+          buildFinding(this, hit, {
+            title: `Pre-2025 Tasks draft surface (${hit.text.slice(1, -1)})`,
+            explanation:
+              'This literal comes from an experimental Tasks draft that predates the 2025-11-25 baseline. It is not a 2025-11-25 removal, but it is also not part of the 2026-07-28 Tasks extension. ' +
+              MIGRATION_SUMMARY,
+            remediation,
+          }),
+        );
+      }
+
+      for (const { hit } of matches(
+        context,
+        this,
+        file,
         identifierLiteral(LEGACY_TASK_IDENTIFIERS),
       )) {
+        if (!sourceFile || !isMcpSdkIdentifier(sourceFile, hit.offset)) continue;
         findings.push(
           buildFinding(this, hit, {
             title: `Legacy Tasks SDK surface (${hit.text})`,
@@ -330,6 +384,66 @@ export const legacyTaskStructuresRule: ScannerRule = {
             remediation,
           }),
         );
+      }
+
+
+      // The 2025 request shape let a client opt a tools/call into task mode
+      // with params.task. The target extension makes that decision server-side.
+      for (const { hit } of matches(
+        context,
+        this,
+        file,
+        /\bparams\s*\.\s*task\b/g,
+      )) {
+        if (!localMcp) continue;
+        if (!sourceFile || !isIdentifierUse(sourceFile, hit.offset)) continue;
+        if (
+          !hasContextNear(
+            file,
+            hit.offset,
+            ['tools/call', 'CallToolRequest', 'callTool', 'registerTool'],
+            500,
+            hit.endOffset,
+          )
+        ) {
+          continue;
+        }
+        findings.push(
+          buildFinding(this, hit, {
+            title: 'Legacy per-request tools/call task opt-in (params.task)',
+            explanation,
+            remediation,
+          }),
+        );
+      }
+
+      if (sourceFile) {
+        if (!localMcp) continue;
+        for (const property of collectPropertyPaths(sourceFile)) {
+          if (!/(^|\.)params\.task$/.test(property.path)) continue;
+          if (
+            !hasContextNear(
+              file,
+              property.start,
+              ['tools/call', 'CallToolRequest', 'callTool', 'registerTool'],
+              500,
+              property.end,
+            )
+          ) {
+            continue;
+          }
+          findings.push(
+            buildFinding(
+              this,
+              { file, offset: property.start, endOffset: property.end, text: property.path },
+              {
+                title: 'Legacy per-request tools/call task opt-in (params.task)',
+                explanation,
+                remediation,
+              },
+            ),
+          );
+        }
       }
 
       // Renamed fields are ordinary words; require task context nearby.
@@ -400,6 +514,7 @@ export const taskAugmentedSamplingRule: ScannerRule = {
 
     for (const file of filesFor(this, context)) {
       const sourceFile = getSourceFile(file);
+      if (!fileHasMcpSignal(file)) continue;
 
       if (sourceFile) {
         for (const property of collectPropertyPaths(sourceFile)) {
@@ -410,6 +525,7 @@ export const taskAugmentedSamplingRule: ScannerRule = {
               this,
               { file, offset: property.start, endOffset: property.end, text: property.path },
               {
+                ...legacyEraFindingOverride(file, sourceFile, property.start),
                 title: `Task-augmented capability removed in the extension (${property.path})`,
                 explanation,
                 remediation,
@@ -425,8 +541,10 @@ export const taskAugmentedSamplingRule: ScannerRule = {
         file,
         identifierLiteral(TASK_AUGMENTED_IDENTIFIERS),
       )) {
+        if (!sourceFile || !isMcpSdkIdentifier(sourceFile, hit.offset)) continue;
         findings.push(
           buildFinding(this, hit, {
+            ...legacyEraFindingOverride(file, sourceFile, hit.offset),
             title: `Task-augmented SDK surface removed in the extension (${hit.text})`,
             explanation,
             remediation,

@@ -116,10 +116,20 @@ export const MAX_FILE_BYTES = 1_048_576; // 1 MiB
  * dropped.
  */
 export const MAX_FILES = 20_000;
-export const MAX_TOTAL_BYTES = 134_217_728; // 128 MiB
+export const MAX_TOTAL_BYTES = 33_554_432; // 32 MiB
 
-/** Bytes inspected when deciding whether a file is binary. */
-export const BINARY_SNIFF_BYTES = 8192;
+/**
+ * Parent-linked TypeScript ASTs amplify source size substantially. These
+ * lexical preflight limits bound that amplification before an AST is built.
+ * Literal/comment payload is not charged as structural line content, so large
+ * generated schemas and embedded prose remain scannable when their syntax is
+ * otherwise simple.
+ */
+export const MAX_PARSE_TOKENS_PER_FILE = 250_000;
+export const MAX_PARSE_TOKENS_TOTAL = 500_000;
+export const MAX_SOURCE_LINES_PER_FILE = 100_000;
+export const MAX_SOURCE_LINES_TOTAL = 400_000;
+export const MAX_SOURCE_LINE_LENGTH = 262_144; // 256 Ki structural code units
 
 /** Evidence excerpts are collapsed to one line and truncated to this length. */
 export const MAX_EVIDENCE_LENGTH = 160;

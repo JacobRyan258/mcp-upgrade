@@ -5,10 +5,13 @@ import { isInComment, offsetToPosition } from '../discovery.js';
 import {
   buildFinding,
   dedupeByLocation,
+  fileHasMcpSignal,
   filesFor,
   hasContextNear,
   identifierLiteral,
-  inMcpContext,
+  isExecutableProtocolLiteral,
+  isMcpSdkIdentifier,
+  legacyEraFindingOverride,
   matches,
   quotedLiteral,
 } from './helpers.js';
@@ -46,7 +49,6 @@ const LOGGING_IDENTIFIERS = [
   'LoggingMessageNotification',
   'LoggingLevelSchema',
   'LoggingLevel',
-  'SetLevelRequest',
 ];
 
 /**
@@ -62,12 +64,18 @@ const LOGGING_CALL_NAMES = [/(^|\.)sendLoggingMessage$/];
  */
 const LOGGING_CAPABILITY_PATH = /(^|\.)capabilities\.logging(\.|$)/;
 const LOGGING_BARE_PATH = /^logging$/;
+/**
+ * Vocabulary that makes a bare top-level key a capability declaration rather
+ * than ordinary configuration. Deliberately excludes 'mcp' and
+ * 'modelcontextprotocol': every file in an MCP server contains those in its
+ * import lines, which made the proximity gate vacuous and turned an LLM
+ * wrapper's token-sampling options, a winston logging config and a directory
+ * roots array into asserted capability declarations.
+ */
 const CAPABILITY_CONTEXT_NEEDLES = [
   'capabilities',
   'clientcapabilities',
   'servercapabilities',
-  'mcp',
-  'modelcontextprotocol',
 ];
 
 export const loggingDeprecationRule: ScannerRule = {
@@ -92,9 +100,7 @@ export const loggingDeprecationRule: ScannerRule = {
     for (const file of filesFor(this, context)) {
       const sourceFile = getSourceFile(file);
 
-      // 'notifications/message' is also an unremarkable pub/sub topic name;
-      // without an MCP signal it is not the MCP log notification.
-      if (!inMcpContext(context, file)) continue;
+      const localMcp = fileHasMcpSignal(file);
 
       for (const { hit } of matches(
         context,
@@ -102,6 +108,8 @@ export const loggingDeprecationRule: ScannerRule = {
         file,
         quotedLiteral(LOGGING_NOTIFICATION_LITERALS),
       )) {
+        if (!localMcp) continue;
+        if (!sourceFile || !isExecutableProtocolLiteral(sourceFile, hit.offset)) continue;
         findings.push(
           buildFinding(this, hit, {
             title: 'Deprecated protocol log notification (notifications/message)',
@@ -117,6 +125,7 @@ export const loggingDeprecationRule: ScannerRule = {
       }
 
       for (const { hit } of matches(context, this, file, identifierLiteral(LOGGING_IDENTIFIERS))) {
+        if (!sourceFile || !isMcpSdkIdentifier(sourceFile, hit.offset)) continue;
         findings.push(
           buildFinding(this, hit, {
             title: `Deprecated protocol logging type (${hit.text})`,
@@ -129,6 +138,7 @@ export const loggingDeprecationRule: ScannerRule = {
       if (!sourceFile) continue;
 
       for (const call of collectCalls(sourceFile)) {
+        if (!localMcp) continue;
         if (!LOGGING_CALL_NAMES.some((pattern) => pattern.test(call.name))) continue;
         if (isInComment(file, call.start)) continue;
         findings.push(
@@ -150,6 +160,10 @@ export const loggingDeprecationRule: ScannerRule = {
       }
 
       for (const property of collectPropertyPaths(sourceFile)) {
+        // Deliberately gated on the per-file signal, not repository evidence:
+        // in a monorepo a sibling package's generic `capabilities: { roots: {} }`
+        // config must not borrow provenance from an MCP package next to it.
+        if (!localMcp) continue;
         const explicit = LOGGING_CAPABILITY_PATH.test(property.path);
         const bare =
           LOGGING_BARE_PATH.test(property.path) &&
@@ -183,7 +197,15 @@ export const loggingDeprecationRule: ScannerRule = {
 /* -------------------------------------------------------------------------- */
 
 const SET_LEVEL_LITERALS = ['logging/setLevel'];
-const SET_LEVEL_IDENTIFIERS = ['SetLevelRequestSchema', 'setLoggingLevel'];
+const SET_LEVEL_IDENTIFIERS = ['SetLevelRequestSchema', 'SetLevelRequest', 'setLoggingLevel'];
+
+/**
+ * `setLoggingLevel` is an instance method on the SDK `Client`, so it never
+ * appears in an import statement. Matching it only as an imported identifier
+ * meant a client sending the removed RPC scanned completely clean; it needs the
+ * call-expression treatment `sendLoggingMessage` already gets.
+ */
+const SET_LEVEL_CALL_NAMES = [/(^|\.)setLoggingLevel$/];
 
 export const loggingSetLevelRule: ScannerRule = {
   id: 'MCP2026-LOGGING-002',
@@ -220,16 +242,44 @@ export const loggingSetLevelRule: ScannerRule = {
       'move to stderr or OpenTelemetry.';
 
     for (const file of filesFor(this, context)) {
+      const sourceFile = getSourceFile(file);
       for (const { hit } of matches(context, this, file, quotedLiteral(SET_LEVEL_LITERALS))) {
-        findings.push(buildFinding(this, hit, { explanation, remediation }));
-      }
-      for (const { hit } of matches(context, this, file, identifierLiteral(SET_LEVEL_IDENTIFIERS))) {
+        if (!sourceFile || !isExecutableProtocolLiteral(sourceFile, hit.offset)) continue;
         findings.push(
           buildFinding(this, hit, {
+            ...legacyEraFindingOverride(file, sourceFile, hit.offset),
+            explanation,
+            remediation,
+          }),
+        );
+      }
+      for (const { hit } of matches(context, this, file, identifierLiteral(SET_LEVEL_IDENTIFIERS))) {
+        if (!sourceFile || !isMcpSdkIdentifier(sourceFile, hit.offset)) continue;
+        findings.push(
+          buildFinding(this, hit, {
+            ...legacyEraFindingOverride(file, sourceFile, hit.offset),
             title: `SDK surface for the removed logging/setLevel RPC (${hit.text})`,
             explanation,
             remediation,
           }),
+        );
+      }
+
+      if (!sourceFile || !fileHasMcpSignal(file)) continue;
+      for (const call of collectCalls(sourceFile)) {
+        if (!SET_LEVEL_CALL_NAMES.some((pattern) => pattern.test(call.name))) continue;
+        if (isInComment(file, call.start)) continue;
+        findings.push(
+          buildFinding(
+            this,
+            { file, offset: call.start, endOffset: call.end, text: call.name },
+            {
+              ...legacyEraFindingOverride(file, sourceFile, call.start),
+              title: `SDK surface for the removed logging/setLevel RPC (${call.name})`,
+              explanation,
+              remediation,
+            },
+          ),
         );
       }
     }

@@ -1,28 +1,16 @@
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
 import {
-  DEFAULT_TARGET_VERSION,
   EXIT_FINDINGS,
   EXIT_OK,
+  EXIT_USAGE,
   FAIL_ON_LEVELS,
-  KNOWN_TARGETS,
-  MAX_FILE_BYTES,
-  MAX_FILES,
-  MAX_TOTAL_BYTES,
-  SUPPORTED_EXTENSIONS,
 } from '../../constants.js';
+import { resolveScanOptions } from '../../options.js';
+import type { ResolveScanExtras } from '../../options.js';
 import { renderChecklistReport } from '../../reporters/checklist.js';
 import { renderJsonReport } from '../../reporters/json.js';
 import { renderTextReport } from '../../reporters/text.js';
 import { runScan } from '../../scanner/engine.js';
-import type {
-  Confidence,
-  FailOnLevel,
-  OutputFormat,
-  ResolvedScanOptions,
-  ScanReport,
-} from '../../types.js';
-import { UsageError } from '../../types.js';
+import type { OutputFormat, ResolvedScanOptions, ScanReport } from '../../types.js';
 
 /** Raw option values as commander produces them. */
 export interface RawScanOptions {
@@ -43,17 +31,7 @@ export interface ScanCommandResult {
   report: ScanReport;
 }
 
-const FORMATS: OutputFormat[] = ['text', 'json', 'checklist'];
-const CONFIDENCES: Confidence[] = ['low', 'medium', 'high'];
-const FAIL_ON: FailOnLevel[] = ['error', 'warning', 'review'];
-
-export interface ResolveExtras {
-  /**
-   * Base directory for resolving a relative target. Defaults to
-   * `process.cwd()`; embedding applications should pass it explicitly.
-   */
-  cwd?: string;
-}
+export type ResolveExtras = ResolveScanExtras;
 
 /**
  * Validates CLI input and resolves it against the filesystem.
@@ -67,105 +45,8 @@ export async function resolveOptions(
   raw: RawScanOptions,
   extras: ResolveExtras = {},
 ): Promise<ResolvedScanOptions> {
-  const format = pickOne('format', raw.format ?? 'text', FORMATS);
-  const minConfidence = pickOne('min-confidence', raw.minConfidence ?? 'low', CONFIDENCES);
-
-  const target = raw.target ?? DEFAULT_TARGET_VERSION;
-  if (!KNOWN_TARGETS[target]) {
-    throw new UsageError(
-      `Unknown target specification "${target}". Known targets: ${Object.keys(KNOWN_TARGETS)
-        .sort()
-        .join(', ')}.`,
-    );
-  }
-
-  const ci = raw.ci === true;
-  // `--fail-on` defaults to `error` under `--ci` and is otherwise inert.
-  const failOn = pickOne('fail-on', raw.failOn ?? 'error', FAIL_ON);
-
-  if (!targetPath || targetPath.trim() === '') {
-    throw new UsageError('A path to scan is required. Usage: mcp-upgrade scan <path>');
-  }
-
-  let absolute = path.resolve(extras.cwd ?? process.cwd(), targetPath);
-
-  let stat;
-  try {
-    stat = await fs.stat(absolute);
-  } catch (cause) {
-    const code = (cause as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT') throw new UsageError(`Path does not exist: ${targetPath}`);
-    if (code === 'EACCES' || code === 'EPERM') {
-      throw new UsageError(`Path is not readable (permission denied): ${targetPath}`);
-    }
-    throw new UsageError(`Path could not be read: ${targetPath}`);
-  }
-
-  // Resolve symlinks up front (macOS /tmp is a symlink into /private) so every
-  // downstream relative path is computed against the real location and never
-  // degrades into a `../..`-polluted report path. A user who names a symlink
-  // explicitly is asking for its target.
-  try {
-    absolute = await fs.realpath(absolute);
-  } catch {
-    throw new UsageError(`Path could not be resolved: ${targetPath}`);
-  }
-
-  let rootDir: string;
-  let singleFilePath: string | null;
-
-  if (stat.isDirectory()) {
-    rootDir = absolute;
-    singleFilePath = null;
-    try {
-      await fs.readdir(absolute);
-    } catch {
-      throw new UsageError(`Directory is not readable (permission denied): ${targetPath}`);
-    }
-  } else if (stat.isFile()) {
-    const ext = path.extname(absolute).toLowerCase();
-    if (!(SUPPORTED_EXTENSIONS as readonly string[]).includes(ext)) {
-      throw new UsageError(
-        `Unsupported file type "${ext || '(none)'}". Supported: ${SUPPORTED_EXTENSIONS.join(', ')}.`,
-      );
-    }
-    try {
-      await fs.access(absolute, fs.constants.R_OK);
-    } catch {
-      throw new UsageError(`File is not readable (permission denied): ${targetPath}`);
-    }
-    rootDir = path.dirname(absolute);
-    singleFilePath = absolute;
-  } else {
-    throw new UsageError(`Path is neither a file nor a directory: ${targetPath}`);
-  }
-
-  const ignore = (raw.ignore ?? '')
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter((entry) => entry !== '');
-
-  // The report's `repository.root` is the target as the caller wrote it, so
-  // the same invocation is deterministic regardless of working directory.
-  const displayRoot = targetPath.split(path.sep).join('/').replace(/\/+$/, '') || '/';
-
-  return {
-    rootDir,
-    singleFilePath,
-    displayRoot,
-    format,
-    target,
-    ignore,
-    includeTests: raw.includeTests === true,
-    minConfidence,
-    ci,
-    failOn,
-    color: colorEnabled(raw, format),
-    verbose: raw.verbose === true,
-    maxFileBytes: MAX_FILE_BYTES,
-    maxFiles: MAX_FILES,
-    maxTotalBytes: MAX_TOTAL_BYTES,
-  };
+  const options = await resolveScanOptions(targetPath, { ...raw, color: false }, extras);
+  return { ...options, color: colorEnabled(raw, options.format) };
 }
 
 /**
@@ -176,17 +57,10 @@ export async function resolveOptions(
  */
 function colorEnabled(raw: RawScanOptions, format: OutputFormat): boolean {
   if (format !== 'text') return false;
-  if (raw.color === false || process.env.NO_COLOR) return false;
+  if (raw.color === false || process.env.NO_COLOR !== undefined) return false;
   const force = process.env.FORCE_COLOR;
   if (force !== undefined && force !== '' && force !== '0' && force !== 'false') return true;
   return process.stdout.isTTY === true;
-}
-
-function pickOne<T extends string>(flag: string, value: string, allowed: T[]): T {
-  if ((allowed as string[]).includes(value)) return value as T;
-  throw new UsageError(
-    `Invalid value "${value}" for --${flag}. Allowed: ${allowed.join(', ')}.`,
-  );
 }
 
 export async function runScanCommand(
@@ -219,10 +93,11 @@ export async function runScanCommand(
 }
 
 /**
- * Exit code from the configured failure threshold. Without `--ci` the scanner
- * always exits 0 on a completed scan: reporting is not failing.
+ * Partial scans fail closed regardless of reporting mode. For complete scans,
+ * the finding threshold is enforced only under `--ci`.
  */
 export function computeExitCode(report: ScanReport, options: ResolvedScanOptions): number {
+  if (report.scanStatus === 'partial') return EXIT_USAGE;
   if (!options.ci) return EXIT_OK;
   const failing = FAIL_ON_LEVELS[options.failOn];
   const total = failing.reduce((sum, level) => sum + report.summary.counts[level], 0);

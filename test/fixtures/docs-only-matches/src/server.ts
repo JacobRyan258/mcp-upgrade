@@ -1,5 +1,5 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { McpServer } from '@modelcontextprotocol/server';
+import { serveStdio } from '@modelcontextprotocol/server/stdio';
 
 /**
  * Migration notes, kept in comments so the team remembers what changed.
@@ -17,7 +17,9 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 // The old error code was -32002; we now use -32602 (Invalid Params).
 // We also removed the "notifications/roots/list_changed" notification.
 
-const server = new McpServer({ name: 'docs-only-matches', version: '1.0.0' });
+function buildServer(): McpServer {
+  return new McpServer({ name: 'docs-only-matches', version: '1.0.0' });
+}
 
 // A regex containing a double slash, which must not be mistaken for a comment
 // by the comment lexer: the literal below is code, not a comment.
@@ -27,4 +29,4 @@ export function isHttps(url: string): boolean {
   return HTTPS_PREFIX.test(url);
 }
 
-await server.connect(new StdioServerTransport());
+await serveStdio(buildServer);

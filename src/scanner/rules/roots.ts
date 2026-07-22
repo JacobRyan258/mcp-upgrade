@@ -5,10 +5,13 @@ import { isInComment, offsetToPosition } from '../discovery.js';
 import {
   buildFinding,
   dedupeByLocation,
+  fileHasMcpSignal,
   filesFor,
   hasContextNear,
   identifierLiteral,
-  inMcpContext,
+  isExecutableProtocolLiteral,
+  isMcpSdkIdentifier,
+  legacyEraFindingOverride,
   matches,
   quotedLiteral,
 } from './helpers.js';
@@ -53,8 +56,6 @@ const ROOTS_IDENTIFIERS = [
  * (never declarations), and only in files with an MCP signal — `listRoots` is
  * an ordinary identifier in filesystem utilities.
  */
-const ROOTS_CALL_NAMES = [/(^|\.)listRoots$/];
-
 /**
  * A `capabilities.roots` path is self-evidencing. A bare top-level `roots` key
  * is not — Jest configs declare `roots` — so it only counts with
@@ -62,12 +63,18 @@ const ROOTS_CALL_NAMES = [/(^|\.)listRoots$/];
  */
 const ROOTS_CAPABILITY_PATH = /(^|\.)capabilities\.roots(\.|$)/;
 const ROOTS_BARE_PATH = /^roots$/;
+/**
+ * Vocabulary that makes a bare top-level key a capability declaration rather
+ * than ordinary configuration. Deliberately excludes 'mcp' and
+ * 'modelcontextprotocol': every file in an MCP server contains those in its
+ * import lines, which made the proximity gate vacuous and turned an LLM
+ * wrapper's token-sampling options, a winston logging config and a directory
+ * roots array into asserted capability declarations.
+ */
 const CAPABILITY_CONTEXT_NEEDLES = [
   'capabilities',
   'clientcapabilities',
   'servercapabilities',
-  'mcp',
-  'modelcontextprotocol',
 ];
 
 export const rootsDeprecationRule: ScannerRule = {
@@ -93,11 +100,10 @@ export const rootsDeprecationRule: ScannerRule = {
     for (const file of filesFor(this, context)) {
       const sourceFile = getSourceFile(file);
 
-      // Roots vocabulary is ordinary vocabulary elsewhere; without an MCP
-      // signal in the repository or file, nothing here is MCP Roots.
-      if (!inMcpContext(context, file)) continue;
+      const localMcp = fileHasMcpSignal(file);
 
       for (const { hit } of matches(context, this, file, quotedLiteral(ROOTS_METHOD_LITERALS))) {
+        if (!sourceFile || !isExecutableProtocolLiteral(sourceFile, hit.offset)) continue;
         findings.push(
           buildFinding(this, hit, {
             title: 'Deprecated Roots method (roots/list)',
@@ -111,6 +117,7 @@ export const rootsDeprecationRule: ScannerRule = {
       }
 
       for (const { hit } of matches(context, this, file, identifierLiteral(ROOTS_IDENTIFIERS))) {
+        if (!sourceFile || !isMcpSdkIdentifier(sourceFile, hit.offset)) continue;
         findings.push(
           buildFinding(this, hit, {
             title: `Deprecated Roots type (${hit.text})`,
@@ -123,17 +130,21 @@ export const rootsDeprecationRule: ScannerRule = {
       if (!sourceFile) continue;
 
       for (const call of collectCalls(sourceFile)) {
-        if (!ROOTS_CALL_NAMES.some((pattern) => pattern.test(call.name))) continue;
-        if (isInComment(file, call.start)) continue;
+        if (
+          !localMcp ||
+          !/(?:^|\.)(?:mcpServer|server|mcp|requestContext|context|ctx|extra)\.listRoots$/.test(
+            call.name,
+          )
+        ) {
+          continue;
+        }
         findings.push(
           buildFinding(
             this,
             { file, offset: call.start, endOffset: call.end, text: call.name },
             {
-              title: 'Server relies on deprecated Roots for filesystem context',
-              explanation: `${DEPRECATION_STATEMENT} This call asks the client for its roots, which ` +
-                'under Multi Round-Trip Requests is no longer a request the server can issue ' +
-                'directly on a stream.',
+              title: 'Deprecated Roots request call',
+              explanation: DEPRECATION_STATEMENT,
               remediation: MIGRATION_GUIDANCE,
               confidence: 'high',
             },
@@ -142,6 +153,10 @@ export const rootsDeprecationRule: ScannerRule = {
       }
 
       for (const property of collectPropertyPaths(sourceFile)) {
+        // Deliberately gated on the per-file signal, not repository evidence:
+        // in a monorepo a sibling package's generic `capabilities: { roots: {} }`
+        // config must not borrow provenance from an MCP package next to it.
+        if (!localMcp) continue;
         const explicit = ROOTS_CAPABILITY_PATH.test(property.path);
         const bare =
           ROOTS_BARE_PATH.test(property.path) &&
@@ -177,6 +192,13 @@ export const rootsDeprecationRule: ScannerRule = {
 const ROOTS_CHANGED_LITERALS = ['notifications/roots/list_changed'];
 const ROOTS_CHANGED_IDENTIFIERS = ['RootsListChangedNotificationSchema', 'sendRootsListChanged'];
 
+/**
+ * `sendRootsListChanged` is an instance method on the SDK `Client`, so it never
+ * appears in an import statement. Matching it only as an imported identifier
+ * meant a client emitting the removed notification scanned completely clean.
+ */
+const ROOTS_CHANGED_CALL_NAMES = [/(^|\.)sendRootsListChanged$/];
+
 export const rootsListChangedRule: ScannerRule = {
   id: 'MCP2026-ROOTS-002',
   title: 'notifications/roots/list_changed is removed in the target specification',
@@ -211,8 +233,16 @@ export const rootsListChangedRule: ScannerRule = {
       'context to a tool parameter, resource URI or server configuration.';
 
     for (const file of filesFor(this, context)) {
+      const sourceFile = getSourceFile(file);
       for (const { hit } of matches(context, this, file, quotedLiteral(ROOTS_CHANGED_LITERALS))) {
-        findings.push(buildFinding(this, hit, { explanation, remediation }));
+        if (!sourceFile || !isExecutableProtocolLiteral(sourceFile, hit.offset)) continue;
+        findings.push(
+          buildFinding(this, hit, {
+            ...legacyEraFindingOverride(file, sourceFile, hit.offset),
+            explanation,
+            remediation,
+          }),
+        );
       }
       for (const { hit } of matches(
         context,
@@ -220,12 +250,32 @@ export const rootsListChangedRule: ScannerRule = {
         file,
         identifierLiteral(ROOTS_CHANGED_IDENTIFIERS),
       )) {
+        if (!sourceFile || !isMcpSdkIdentifier(sourceFile, hit.offset)) continue;
         findings.push(
           buildFinding(this, hit, {
+            ...legacyEraFindingOverride(file, sourceFile, hit.offset),
             title: `SDK surface for the removed roots notification (${hit.text})`,
             explanation,
             remediation,
           }),
+        );
+      }
+
+      if (!sourceFile || !fileHasMcpSignal(file)) continue;
+      for (const call of collectCalls(sourceFile)) {
+        if (!ROOTS_CHANGED_CALL_NAMES.some((pattern) => pattern.test(call.name))) continue;
+        if (isInComment(file, call.start)) continue;
+        findings.push(
+          buildFinding(
+            this,
+            { file, offset: call.start, endOffset: call.end, text: call.name },
+            {
+              ...legacyEraFindingOverride(file, sourceFile, call.start),
+              title: `SDK surface for the removed roots notification (${call.name})`,
+              explanation,
+              remediation,
+            },
+          ),
         );
       }
     }

@@ -17,23 +17,26 @@ jobs:
   test:
     name: Node ${{ matrix.node }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        node: ['20.x', '22.x', '24.x']
+        node: ['22.12.0', '24.x', '26.x']
         os: [ubuntu-latest]
         include:
-          # One non-Linux runner, because path handling is the most likely
-          # source of a platform-specific bug in a file scanner.
-          - node: '22.x'
+          - node: '24.x'
             os: windows-latest
-          - node: '22.x'
+          - node: '24.x'
             os: macos-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -47,50 +50,64 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Unit tests
+      - name: Unit and CLI integration tests
         run: npm test
 
       - name: Build
         run: npm run build
 
-  integration:
-    name: Packaged CLI integration
+  package:
+    name: Packed package on Node ${{ matrix.node }}
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.12.0', '26.x']
 
-      - uses: actions/setup-node@v4
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          node-version: '22.x'
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ matrix.node }}
           cache: npm
 
-      - run: npm ci
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Build
-        run: npm run build
-
-      - name: Inspect package contents
+      - name: Inspect npm dry run
         run: npm pack --dry-run
 
-      - name: Pack tarball
-        run: npm pack --pack-destination /tmp
+      - name: Pack, inspect, install, and execute externally
+        run: npm run verify:package
 
-      - name: Install the tarball into a clean project and exercise the CLI
-        run: bash scripts/verify-package.sh
-
-  publish-dry-run:
-    name: npm publish dry run
+  dependency-audit:
+    name: Production dependency audit
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    timeout-minutes: 10
 
-      - uses: actions/setup-node@v4
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          node-version: '22.x'
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '24.x'
           cache: npm
 
-      - run: npm ci
+      - name: Install dependencies
+        run: npm ci
 
-      # Dry run only. This workflow never publishes.
-      - name: Publish dry run
-        run: npm publish --dry-run
+      - name: Audit production dependencies
+        run: npm run audit:production
+
+      - name: Scan tracked files for secrets
+        run: npm run check:secrets

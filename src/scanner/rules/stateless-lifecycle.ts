@@ -6,7 +6,8 @@ import {
   collectPropertyPaths,
   getSourceFile,
   isInsideMultilineTemplate,
-  walk,
+  nodeAt,
+  propertyKeyText,
 } from '../ast.js';
 import { isInComment, offsetToPosition } from '../discovery.js';
 import {
@@ -16,6 +17,9 @@ import {
   filesFor,
   hasContextNear,
   identifierLiteral,
+  isExecutableProtocolLiteral,
+  isMcpSdkIdentifier,
+  legacyEraFindingOverride,
   matches,
   quotedLiteral,
 } from './helpers.js';
@@ -55,8 +59,8 @@ export const sessionHeaderRule: ScannerRule = {
   title: 'Mcp-Session-Id header is removed in the target specification',
   category: 'stateless-lifecycle',
   targetVersion: DEFAULT_TARGET_VERSION,
-  level: 'error',
-  defaultConfidence: 'high',
+  level: 'warning',
+  defaultConfidence: 'medium',
   source: SOURCES.sep2567,
   appliesTo: {
     fileKinds: ['ts', 'js', 'json', 'yaml'],
@@ -75,7 +79,8 @@ export const sessionHeaderRule: ScannerRule = {
       const sourceFile = getSourceFile(file);
 
       if (sourceFile) {
-        for (const access of collectHeaderAccess(sourceFile, SESSION_HEADER_NAMES)) {
+        const accesses = collectHeaderAccess(sourceFile, SESSION_HEADER_NAMES);
+        for (const access of accesses) {
           if (isInComment(file, access.start)) {
             const { line } = offsetToPosition(file, access.start);
             context.noteCommentOnlyMatch(this.id, file.relPath, line, access.header);
@@ -86,6 +91,10 @@ export const sessionHeaderRule: ScannerRule = {
               this,
               { file, offset: access.start, endOffset: access.end, text: access.header },
               {
+                ...legacyEraFindingOverride(file, sourceFile, access.start),
+                ...(access.mode === 'read'
+                  ? { level: 'review' as const, confidence: 'low' as const }
+                  : {}),
                 explanation: STATELESS_EXPLANATION,
                 remediation: STATELESS_REMEDIATION,
                 title:
@@ -100,7 +109,23 @@ export const sessionHeaderRule: ScannerRule = {
       }
 
       // Config files and any access shape the AST pass did not recognise.
+      const astAccesses = sourceFile
+        ? collectHeaderAccess(sourceFile, SESSION_HEADER_NAMES)
+        : [];
       for (const { hit } of matches(context, this, file, /['"`]mcp-session-id['"`]/gi)) {
+        if (astAccesses.some((access) => hit.offset >= access.start && hit.offset < access.end)) continue;
+        // In source code, a bare literal is too weak to establish that this is
+        // an MCP server. Detector tables, migration helpers, and prose all use
+        // the same token. Structural header reads/writes above remain
+        // self-evidencing; this fallback is for executable literals in a
+        // repository that classification already identified as MCP.
+        if (
+          sourceFile &&
+          (!context.repository.isLikelyMcpServer ||
+            !isExecutableProtocolLiteral(sourceFile, hit.offset))
+        ) {
+          continue;
+        }
         const documentation =
           sourceFile !== null &&
           isInsideMultilineTemplate(sourceFile, file.content, hit.offset);
@@ -109,14 +134,13 @@ export const sessionHeaderRule: ScannerRule = {
             explanation: STATELESS_EXPLANATION,
             remediation: STATELESS_REMEDIATION,
             transportApplicability: 'streamable-http',
+            level: 'review',
+            confidence: 'low',
+            title: 'Mcp-Session-Id compatibility literal needs review',
             // A multi-line template string is usually prose or generated text,
             // not header handling; keep the location visible but do not assert.
             ...(documentation
-              ? {
-                  level: 'review' as const,
-                  confidence: 'low' as const,
-                  title: 'Mcp-Session-Id literal inside a multi-line template string',
-                }
+              ? { title: 'Mcp-Session-Id literal inside a multi-line template string' }
               : {}),
           }),
         );
@@ -131,6 +155,8 @@ export const sessionHeaderRule: ScannerRule = {
               explanation: STATELESS_EXPLANATION,
               remediation: STATELESS_REMEDIATION,
               transportApplicability: 'streamable-http',
+              level: 'review',
+              confidence: 'low',
             }),
           );
         }
@@ -169,7 +195,7 @@ export const sessionTransportOptionsRule: ScannerRule = {
 
     for (const file of filesFor(this, context)) {
       const sourceFile = getSourceFile(file);
-      if (!sourceFile) continue;
+      if (!sourceFile || !fileHasMcpSignal(file)) continue;
 
       for (const property of collectPropertyPaths(sourceFile)) {
         if (!SESSION_TRANSPORT_OPTIONS.includes(property.key)) continue;
@@ -182,17 +208,10 @@ export const sessionTransportOptionsRule: ScannerRule = {
         // `sessionIdGenerator: undefined` is already the stateless shape the
         // TypeScript SDK documents, so it is not a finding.
         if (
-          property.key === 'sessionIdGenerator' &&
           ts.isPropertyAssignment(property.node) &&
-          property.node.initializer.kind === ts.SyntaxKind.UndefinedKeyword
-        ) {
-          continue;
-        }
-        if (
-          property.key === 'sessionIdGenerator' &&
-          ts.isPropertyAssignment(property.node) &&
-          ts.isIdentifier(property.node.initializer) &&
-          property.node.initializer.text === 'undefined'
+          (property.node.initializer.kind === ts.SyntaxKind.UndefinedKeyword ||
+            (ts.isIdentifier(property.node.initializer) &&
+              property.node.initializer.text === 'undefined'))
         ) {
           continue;
         }
@@ -202,6 +221,7 @@ export const sessionTransportOptionsRule: ScannerRule = {
             this,
             { file, offset: property.start, endOffset: property.end, text: property.key },
             {
+              ...legacyEraFindingOverride(file, sourceFile, property.start),
               explanation:
                 `The transport option "${property.key}" exists to create or observe protocol-level ` +
                 'MCP sessions. SEP-2567 removes sessions from the protocol outright — the SEP calls it ' +
@@ -234,7 +254,7 @@ export const sessionTransportOptionsRule: ScannerRule = {
 // \w* forms are quadratic on long identifier runs.
 const SESSION_STORE_PATTERNS: RegExp[] = [
   /\bnew\s+Map\s*<\s*string\s*,\s*\w{0,64}(?:Transport|Server|Session)\w{0,64}\s*>/g,
-  /\b(?:transports|sessions|sessionStore|sessionMap|activeSessions|mcpSessions)\s*(?::|=)/g,
+  /\b(?:const|let|var|private|public|protected|readonly)\s+(?:transports|sessions|sessionStore|sessionMap|activeSessions|mcpSessions)\s*(?::[^=;\r\n]{0,256})?=\s*(?:new\s+Map\b|\{\s*\})/g,
   /\b(?:transports|sessions|sessionStore|sessionMap|activeSessions|mcpSessions)\s*\[\s*\w{0,64}[sS]ession\w{0,64}\s*\]/g,
   /\bdelete\s+\w{1,64}\s*\[\s*\w{0,64}[sS]essionId\w{0,64}\s*\]/g,
 ];
@@ -341,8 +361,18 @@ export const stickySessionConfigRule: ScannerRule = {
     const findings: Finding[] = [];
 
     for (const file of filesFor(this, context)) {
+      if (
+        !context.repository.isLikelyMcpServer &&
+        !fileHasMcpSignal(file) &&
+        !hasContextNear(file, 0, ['mcp', 'modelcontextprotocol', 'mcp-method'], file.content.length)
+      ) {
+        continue;
+      }
+      const sourceFile = getSourceFile(file);
       for (const pattern of STICKY_CONFIG_PATTERNS) {
         for (const { hit } of matches(context, this, file, pattern)) {
+          const node = sourceFile ? nodeAt(sourceFile, hit.offset) : undefined;
+          if (node && ts.isRegularExpressionLiteral(node)) continue;
           findings.push(
             buildFinding(this, hit, {
               explanation:
@@ -423,19 +453,27 @@ export const initializationLifecycleRule: ScannerRule = {
 
     for (const file of filesFor(this, context)) {
       const sourceFile = getSourceFile(file);
-      if (!sourceFile) continue;
+      if (!sourceFile || !hasStrongMcpProvenance(context, file)) continue;
 
       // Method-name string literals, but only where they are clearly MCP
       // lifecycle methods: `notifications/initialized` is unambiguous on its
       // own, while bare `initialize` needs a handler registration around it.
       for (const { hit } of matches(context, this, file, quotedLiteral(LIFECYCLE_METHOD_LITERALS))) {
         const literal = hit.text.slice(1, -1);
-        if (literal === 'initialize' && !isMethodHandlerArgument(sourceFile, file, hit.offset)) {
+        if (
+          !isMethodHandlerArgument(sourceFile, file, hit.offset) &&
+          !isMethodSwitchCase(sourceFile, hit.offset) &&
+          !isMethodComparison(sourceFile, hit.offset) &&
+          !(literal === 'notifications/initialized'
+            ? isExecutableProtocolLiteral(sourceFile, hit.offset)
+            : isJsonRpcMethodLiteral(sourceFile, hit.offset))
+        ) {
           continue;
         }
         const documentation = isInsideMultilineTemplate(sourceFile, file.content, hit.offset);
         findings.push(
           buildFinding(this, hit, {
+            ...legacyEraFindingOverride(file, sourceFile, hit.offset),
             explanation,
             remediation,
             title: `Handling of the removed "${literal}" lifecycle method`,
@@ -456,8 +494,10 @@ export const initializationLifecycleRule: ScannerRule = {
         file,
         identifierLiteral(LIFECYCLE_SDK_IDENTIFIERS),
       )) {
+        if (!isMcpSdkIdentifier(sourceFile, hit.offset)) continue;
         findings.push(
           buildFinding(this, hit, {
+            ...legacyEraFindingOverride(file, sourceFile, hit.offset),
             explanation,
             remediation,
             title: `SDK schema for the removed lifecycle method (${hit.text})`,
@@ -480,18 +520,112 @@ function isMethodHandlerArgument(
   file: PreparedFile,
   offset: number,
 ): boolean {
-  let found = false;
   const allowGeneric = fileHasMcpSignal(file);
-  walk(sourceFile, (node) => {
-    if (found || !ts.isCallExpression(node)) return;
-    const first = node.arguments[0];
-    if (!first || !ts.isStringLiteralLike(first)) return;
-    if (first.getStart(sourceFile, false) !== offset) return;
-    const name = expressionName(node.expression);
-    if (STRICT_HANDLER_CALLS.test(name)) found = true;
-    else if (allowGeneric && GENERIC_HANDLER_CALLS.test(name)) found = true;
-  });
-  return found;
+  let current = nodeAt(sourceFile, offset);
+  let depth = 0;
+  while (current && depth < 12) {
+    const parent = current.parent;
+    if (!parent) return false;
+    if (ts.isCallExpression(parent)) {
+      const first = parent.arguments[0];
+      if (!first || first.getStart(sourceFile, false) !== offset) return false;
+      const name = expressionName(parent.expression);
+      return STRICT_HANDLER_CALLS.test(name) || (allowGeneric && GENERIC_HANDLER_CALLS.test(name));
+    }
+    if (ts.isVariableDeclaration(parent) || ts.isSourceFile(parent)) return false;
+    current = parent;
+    depth++;
+  }
+  return false;
+}
+
+function isJsonRpcMethodLiteral(sourceFile: ts.SourceFile, offset: number): boolean {
+  let current = nodeAt(sourceFile, offset);
+  let depth = 0;
+  while (current && depth < 8) {
+    const parent = current.parent;
+    if (!parent) return false;
+    if (ts.isPropertyAssignment(parent) && propertyKeyText(parent.name) === 'method') return true;
+    if (ts.isVariableDeclaration(parent) || ts.isSourceFile(parent)) return false;
+    current = parent;
+    depth++;
+  }
+  return false;
+}
+
+/**
+ * Unambiguous MCP methods: a slash-bearing name no other protocol uses. Their
+ * presence in the same dispatch construct is what proves the construct routes
+ * MCP rather than, say, WebSocket frames.
+ */
+const MCP_METHOD_CORROBORATION =
+  /['"`](?:server\/discover|tools\/(?:list|call)|resources\/(?:list|read|subscribe|unsubscribe|templates\/list)|prompts\/(?:list|get)|tasks\/(?:list|result|get|update|cancel)|roots\/list|sampling\/createMessage|elicitation\/create|logging\/setLevel|completion\/complete|subscriptions\/listen|notifications\/[a-z/_]+)['"`]/i;
+
+/**
+ * True when the dispatch construct containing this offset also routes at least
+ * one unambiguous MCP method.
+ *
+ * `initialize` and `ping` are ordinary words. A `switch (frame.method)` in a
+ * WebSocket handler legitimately has `case 'ping':`, so a method-shaped
+ * discriminant alone is not enough — the construct must visibly handle a real
+ * MCP method as well.
+ */
+function dispatchRoutesMcp(sourceFile: ts.SourceFile, node: ts.Node): boolean {
+  let current: ts.Node | undefined = node;
+  let depth = 0;
+  while (current && depth < 16) {
+    if (
+      ts.isSwitchStatement(current) ||
+      ts.isFunctionDeclaration(current) ||
+      ts.isFunctionExpression(current) ||
+      ts.isArrowFunction(current) ||
+      ts.isMethodDeclaration(current)
+    ) {
+      return MCP_METHOD_CORROBORATION.test(current.getText(sourceFile));
+    }
+    current = current.parent;
+    depth++;
+  }
+  return false;
+}
+
+/**
+ * True for `case 'initialize':` inside a `switch (request.method)` that also
+ * routes a real MCP method. Switch dispatch is the canonical hand-rolled
+ * JSON-RPC server shape — the scanner's own classifier treats it as the marker
+ * of a custom MCP server — so the ambiguous bare methods must be recognised
+ * there too.
+ */
+function isMethodSwitchCase(sourceFile: ts.SourceFile, offset: number): boolean {
+  const node = nodeAt(sourceFile, offset);
+  const caseClause = node?.parent;
+  if (!caseClause || !ts.isCaseClause(caseClause) || caseClause.expression !== node) return false;
+  const switchStatement = caseClause.parent.parent;
+  if (!ts.isSwitchStatement(switchStatement)) return false;
+  if (!/\bmethod\b/i.test(switchStatement.expression.getText(sourceFile))) return false;
+  return dispatchRoutesMcp(sourceFile, switchStatement);
+}
+
+/**
+ * True for `if (request.method === 'initialize')` — the if/else-chain
+ * equivalent of switch dispatch — subject to the same MCP corroboration.
+ */
+function isMethodComparison(sourceFile: ts.SourceFile, offset: number): boolean {
+  const node = nodeAt(sourceFile, offset);
+  const comparison = node?.parent;
+  if (!comparison || !ts.isBinaryExpression(comparison)) return false;
+  const operator = comparison.operatorToken.kind;
+  if (
+    operator !== ts.SyntaxKind.EqualsEqualsEqualsToken &&
+    operator !== ts.SyntaxKind.EqualsEqualsToken &&
+    operator !== ts.SyntaxKind.ExclamationEqualsEqualsToken &&
+    operator !== ts.SyntaxKind.ExclamationEqualsToken
+  ) {
+    return false;
+  }
+  const other = comparison.left === node ? comparison.right : comparison.left;
+  if (!/\bmethod\b/i.test(other.getText(sourceFile))) return false;
+  return dispatchRoutesMcp(sourceFile, comparison);
 }
 
 function expressionName(node: ts.Expression, depth = 0): string {
@@ -569,16 +703,27 @@ export const removedCoreMethodsRule: ScannerRule = {
           'receives -32601 Method not found (HTTP 404).';
 
         for (const { hit } of matches(context, this, file, quotedLiteral([removed.method]))) {
+          if (removed.method === 'ping' && !hasStrongMcpProvenance(context, file)) continue;
           // `ping` is a common word; require a handler or call context.
           if (
             removed.method === 'ping' &&
-            !isMethodHandlerArgument(sourceFile, file, hit.offset)
+            !isMethodHandlerArgument(sourceFile, file, hit.offset) &&
+            !isMethodSwitchCase(sourceFile, hit.offset) &&
+            !isMethodComparison(sourceFile, hit.offset) &&
+            !isJsonRpcMethodLiteral(sourceFile, hit.offset)
+          ) {
+            continue;
+          }
+          if (
+            removed.method !== 'ping' &&
+            !isExecutableProtocolLiteral(sourceFile, hit.offset)
           ) {
             continue;
           }
           const documentation = isInsideMultilineTemplate(sourceFile, file.content, hit.offset);
           findings.push(
             buildFinding(this, hit, {
+              ...legacyEraFindingOverride(file, sourceFile, hit.offset),
               explanation,
               remediation: removed.replacement,
               title: `Removed core RPC "${removed.method}"`,
@@ -599,8 +744,10 @@ export const removedCoreMethodsRule: ScannerRule = {
           file,
           identifierLiteral(removed.sdkIdentifiers),
         )) {
+          if (!isMcpSdkIdentifier(sourceFile, hit.offset)) continue;
           findings.push(
             buildFinding(this, hit, {
+              ...legacyEraFindingOverride(file, sourceFile, hit.offset),
               explanation,
               remediation: removed.replacement,
               title: `SDK schema for the removed RPC "${removed.method}" (${hit.text})`,
@@ -609,8 +756,15 @@ export const removedCoreMethodsRule: ScannerRule = {
         }
       }
 
-      // The `resources.subscribe` sub-capability advertised support for the
-      // removed subscribe/unsubscribe RPCs, so it no longer means anything.
+      // The `resources.subscribe` sub-capability is RETAINED in 2026-07-28 with
+      // new meaning — the draft Resources page defines it as "whether the server
+      // supports resource-specific update notifications for resources requested
+      // through subscriptions/listen using the resourceSubscriptions filter",
+      // and shows it in a valid target-era capability example. Only the
+      // resources/subscribe and resources/unsubscribe RPCs were removed. So this
+      // declaration is REVIEW — it needs a human to confirm which mechanism
+      // backs it — and never an error telling the user to delete a capability
+      // the target specification expects subscribing servers to declare.
       for (const property of collectPropertyPaths(sourceFile)) {
         if (!/^capabilities\.resources\.subscribe$/.test(property.path)) continue;
         if (isInComment(file, property.start)) continue;
@@ -619,17 +773,24 @@ export const removedCoreMethodsRule: ScannerRule = {
             this,
             { file, offset: property.start, endOffset: property.end, text: property.path },
             {
-              title: 'Capability advertises the removed resources/subscribe RPC',
+              level: 'review',
+              confidence: 'medium',
+              title: 'resources.subscribe capability needs subscriptions/listen backing',
               explanation:
-                'The resources.subscribe capability advertised support for resources/subscribe, ' +
-                'which 2026-07-28 removes: the changelog replaces it and resources/unsubscribe ' +
-                'with subscriptions/listen. Advertising it tells a client the server supports a ' +
-                'method it can no longer call.',
+                'The resources.subscribe capability is retained in MCP 2026-07-28, but its meaning ' +
+                'changed: it now declares "whether the server supports resource-specific update ' +
+                'notifications for resources requested through subscriptions/listen using the ' +
+                'resourceSubscriptions filter". The resources/subscribe and resources/unsubscribe ' +
+                'RPCs that previously backed it are removed. Declaring the capability while still ' +
+                'implementing only the removed RPCs advertises updates the server can no longer ' +
+                'deliver.',
               remediation:
-                'Drop the subscribe sub-capability and implement subscriptions/listen instead. A ' +
-                'client opts into resource updates by passing the URIs it cares about in ' +
+                'Keep the capability if the server delivers resource updates through ' +
+                'subscriptions/listen: a client opts in by passing the URIs it cares about in ' +
                 'params.notifications.resourceSubscriptions, and the response stream of that one ' +
-                'request carries the notifications.',
+                'request carries notifications/resources/updated. Remove the resources/subscribe ' +
+                'and resources/unsubscribe handlers. Drop the capability only if the server will ' +
+                'not support resource subscriptions at all.',
             },
           ),
         );
@@ -676,8 +837,11 @@ const REMOVED_MECHANICS: RemovedMechanic[] = [
   },
   {
     // `mcp` must be a path segment or hyphenated word — `/mcp`, `/api/mcp-server` —
-    // never a bare substring (`/mcpanel`, `/team/mcpherson`).
-    pattern: /\b(?:app|router|server)\.delete\s*\(\s*['"`][^'"`]*[/._-]mcp(?:[/._-]|['"`])/gi,
+    // never a bare substring (`/mcpanel`, `/team/mcpherson`). The leading slash
+    // is required because the receiver is unconstrained: without it, ordinary
+    // key lookups such as `flags.delete('mcp')` read as an HTTP route.
+    pattern:
+      /\b(?:[A-Za-z_$][\w$]*\.)+delete\s*\(\s*['"`]\/(?:[^'"`]*\/)?mcp(?:[/-](?:sse|stream|streaming|events?|messages?|notifications?))?\/?['"`]/gi,
     title: 'HTTP DELETE session-termination route',
     what:
       'HTTP DELETE terminated a session in protocol versions 2025-03-26 through 2025-11-25. With ' +
@@ -688,7 +852,8 @@ const REMOVED_MECHANICS: RemovedMechanic[] = [
       'terminate.',
   },
   {
-    pattern: /\b(?:app|router|server)\.get\s*\(\s*['"`][^'"`]*[/._-]mcp(?:[/._-]|['"`])/gi,
+    pattern:
+      /\b(?:[A-Za-z_$][\w$]*\.)+get\s*\(\s*['"`]\/(?:[^'"`]*\/)?mcp(?:[/-](?:sse|stream|streaming|events?|messages?|notifications?))?\/?['"`]/gi,
     title: 'HTTP GET stream endpoint',
     what:
       'The standalone GET SSE endpoint is removed: "The MCP endpoint MUST provide a single HTTP ' +
@@ -705,7 +870,7 @@ export const removedTransportMechanicsRule: ScannerRule = {
   title: 'Streamable HTTP mechanic removed in the target specification',
   category: 'stateless-lifecycle',
   targetVersion: DEFAULT_TARGET_VERSION,
-  level: 'error',
+  level: 'warning',
   defaultConfidence: 'medium',
   source: SOURCES.streamableHttp,
   appliesTo: {
@@ -721,10 +886,49 @@ export const removedTransportMechanicsRule: ScannerRule = {
     const findings: Finding[] = [];
 
     for (const file of filesFor(this, context)) {
+      const sourceFile = getSourceFile(file);
+      const lastEventAccesses = sourceFile
+        ? collectHeaderAccess(sourceFile, new Set(['last-event-id']))
+        : [];
       for (const mechanic of REMOVED_MECHANICS) {
         for (const { hit } of matches(context, this, file, mechanic.pattern)) {
+          if (
+            (mechanic.title === 'HTTP GET stream endpoint' ||
+              mechanic.title === 'HTTP DELETE session-termination route') &&
+            sourceFile &&
+            routeReturnsMethodNotAllowed(sourceFile, hit.offset)
+          ) {
+            continue;
+          }
+          if (
+            (mechanic.title === 'Transport event store for stream replay' ||
+              mechanic.title === 'SSE stream resumability via Last-Event-ID') &&
+            !fileHasMcpSignal(file) &&
+            !hasContextNear(file, hit.offset, ['streamablehttp', 'sse', '/mcp'], 500, hit.endOffset)
+          ) {
+            continue;
+          }
+          const lastEventAccess = lastEventAccesses.find(
+            (access) => hit.offset >= access.start && hit.offset < access.end,
+          );
+          const replayContext = hasContextNear(
+            file,
+            hit.offset,
+            ['replay', 'resume', 'resumable', 'event id', 'eventId'],
+            500,
+            hit.endOffset,
+          );
+          const ambiguous =
+            (mechanic.title === 'SSE stream resumability via Last-Event-ID' &&
+              lastEventAccess?.mode !== 'write' &&
+              !replayContext) ||
+            (mechanic.title === 'Transport event store for stream replay' && !replayContext);
           findings.push(
             buildFinding(this, hit, {
+              ...legacyEraFindingOverride(file, sourceFile, hit.offset),
+              ...(ambiguous
+                ? { level: 'review' as const, confidence: 'low' as const }
+                : {}),
               explanation: mechanic.what,
               remediation: mechanic.remediation,
               title: mechanic.title,
@@ -738,6 +942,27 @@ export const removedTransportMechanicsRule: ScannerRule = {
     return dedupeByLocation(findings);
   },
 };
+
+function routeReturnsMethodNotAllowed(sourceFile: ts.SourceFile, offset: number): boolean {
+  let current = nodeAt(sourceFile, offset);
+  let depth = 0;
+  while (current && depth < 12) {
+    if (ts.isCallExpression(current)) {
+      const text = current.getText(sourceFile);
+      return /\.sendStatus\s*\(\s*405\s*\)|\.status\s*\(\s*405\s*\)/.test(text);
+    }
+    current = current.parent;
+    depth++;
+  }
+  return false;
+}
+
+function hasStrongMcpProvenance(_context: ScanContext, file: PreparedFile): boolean {
+  // Repository-wide dependencies are intentionally insufficient here. A
+  // monorepo can contain an MCP server beside an unrelated WebSocket service,
+  // where `ws.on('ping')` is a transport heartbeat rather than an MCP RPC.
+  return fileHasMcpSignal(file);
+}
 
 export const statelessLifecycleRules: ScannerRule[] = [
   sessionHeaderRule,

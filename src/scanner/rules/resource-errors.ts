@@ -1,8 +1,17 @@
+import ts from 'typescript';
 import { DEFAULT_TARGET_VERSION, SOURCES } from '../../constants.js';
 import type { Finding, ScanContext, ScannerRule } from '../../types.js';
 import { collectNumericLiterals, getSourceFile } from '../ast.js';
 import { isInComment, offsetToPosition } from '../discovery.js';
-import { buildFinding, dedupeByLocation, filesFor, hasContextNear } from './helpers.js';
+import {
+  buildFinding,
+  dedupeByLocation,
+  fileHasMcpSignal,
+  filesFor,
+  hasContextNear,
+  isProvenErrorEmission,
+  legacyEraFindingOverride,
+} from './helpers.js';
 
 /**
  * Group 3 — resource error-code migration (SEP-2164).
@@ -12,9 +21,8 @@ import { buildFinding, dedupeByLocation, filesFor, hasContextNear } from './help
  *
  * The subtlety that decides correctness here: the change is a producer/consumer
  * asymmetry, not a ban. Servers MUST return `-32602`; clients SHOULD *still*
- * accept `-32002` from older servers. So code that compares against `-32002`
- * is correct forward-compatible behaviour and must never be flagged — only
- * code that emits it is a finding.
+ * accept `-32002` from older servers alongside `-32602`. A lone old-code
+ * branch needs review, while only proven server emission is an error.
  */
 
 const RESOURCE_CONTEXT_NEEDLES = [
@@ -24,10 +32,8 @@ const RESOURCE_CONTEXT_NEEDLES = [
   'resourcenotfound',
   'resource_not_found',
   'notfoundresource',
-  'uri',
-  'resourceuri',
-  'listresources',
-  'resources/list',
+  'requested resource',
+  'no such resource',
 ];
 
 const EXPLANATION_BASE =
@@ -70,7 +76,7 @@ export const resourceNotFoundEmitRule: ScannerRule = {
 
     for (const file of filesFor(this, context)) {
       const sourceFile = getSourceFile(file);
-      if (!sourceFile) continue;
+      if (!sourceFile || !hasResourceErrorMcpSignal(file)) continue;
 
       for (const hit of collectNumericLiterals(sourceFile, -32002)) {
         if (isInComment(file, hit.start)) {
@@ -82,7 +88,7 @@ export const resourceNotFoundEmitRule: ScannerRule = {
         // is most often an acceptance list, so it goes to MCP2026-ERROR-002
         // for review rather than being asserted here.
         if (hit.usage === 'compare' || hit.usage === 'list') continue;
-        if (hit.usage !== 'emit' && hit.usage !== 'declare') continue;
+        if (hit.usage !== 'emit' || !isProvenErrorEmission(sourceFile, hit.node)) continue;
         if (!hasContextNear(file, hit.start, RESOURCE_CONTEXT_NEEDLES, 400, hit.end)) continue;
 
         findings.push(
@@ -90,10 +96,10 @@ export const resourceNotFoundEmitRule: ScannerRule = {
             this,
             { file, offset: hit.start, endOffset: hit.end, text: '-32002' },
             {
-              confidence: hit.usage === 'emit' ? 'high' : 'medium',
+              ...legacyEraFindingOverride(file, sourceFile, hit.start),
               explanation:
                 `${EXPLANATION_BASE} This literal appears in resource-handling code in a position ` +
-                `that ${hit.usage === 'emit' ? 'emits' : 'defines'} the error code, so a server ` +
+                'that emits the error code, so a server ' +
                 'built from it would return the superseded value.',
               remediation: REMEDIATION_EMIT,
             },
@@ -132,29 +138,37 @@ export const resourceNotFoundAmbiguousRule: ScannerRule = {
     const explanation =
       `${EXPLANATION_BASE} This occurrence could not be conclusively classified: either it has ` +
       'no nearby resource-handling context, or it flows through a helper this scanner cannot ' +
-      'identify as emitting or accepting (a callback, a response builder, a list of codes). It ' +
-      'is reported for review rather than treated as a break. The -32000 to -32019 range remains ' +
+      'identify as emitting or accepting (a callback, a response builder, a list of codes), or it ' +
+      'accepts -32002 without visibly accepting -32602 in the same local scope. It is reported ' +
+      'for review rather than treated as a break. The -32000 to -32019 range remains ' +
       'implementation-defined and existing SDK usage there is explicitly grandfathered.';
 
     const remediation =
       'Check what this code means. If it signals a missing resource from a server, change it to ' +
       '-32602 (Invalid Params). If it is a client accepting -32002 from an older server, leave it: ' +
-      'the draft says clients SHOULD keep accepting it. If it is an unrelated ' +
-      'implementation-defined error, no change is required.';
+      'the draft says clients SHOULD keep accepting it, but also accept -32602 from target-era ' +
+      'servers. If it is an unrelated implementation-defined error, no change is required.';
 
     for (const file of filesFor(this, context)) {
       const sourceFile = getSourceFile(file);
-      if (!sourceFile) continue;
+      if (!sourceFile || !hasResourceErrorMcpSignal(file)) continue;
 
       for (const hit of collectNumericLiterals(sourceFile, -32002)) {
         if (isInComment(file, hit.start)) continue;
-        // Comparisons are correct forward-compatible client behaviour.
-        if (hit.usage === 'compare') continue;
+        // A compatibility branch is complete only when the same local scope
+        // also accepts the target-era -32602 code.
+        if (
+          (hit.usage === 'compare' || hit.usage === 'list') &&
+          acceptsCurrentResourceCode(sourceFile, hit.node)
+        ) {
+          continue;
+        }
         // Emissions and declarations with resource context are MCP2026-ERROR-001's
         // to assert; everything else — unknown usage anywhere, list membership,
         // and emit/declare with no resource context — needs a human.
         const assertedByEmitRule =
-          (hit.usage === 'emit' || hit.usage === 'declare') &&
+          hit.usage === 'emit' &&
+          isProvenErrorEmission(sourceFile, hit.node) &&
           hasContextNear(file, hit.start, RESOURCE_CONTEXT_NEEDLES, 400, hit.end);
         if (assertedByEmitRule) continue;
 
@@ -176,3 +190,32 @@ export const resourceErrorRules: ScannerRule[] = [
   resourceNotFoundEmitRule,
   resourceNotFoundAmbiguousRule,
 ];
+
+function hasResourceErrorMcpSignal(file: Parameters<typeof fileHasMcpSignal>[0]): boolean {
+  if (fileHasMcpSignal(file)) return true;
+  return (
+    /\bjsonrpc\b[\s\S]{0,500}\berror\b/.test(file.content) &&
+    /\b(?:resource not found|requested resource|no such resource|resources\/read|readresource)\b/i.test(
+      file.content,
+    )
+  );
+}
+
+function acceptsCurrentResourceCode(sourceFile: ts.SourceFile, node: ts.Node): boolean {
+  let current: ts.Node | undefined = node;
+  let fallback: ts.Node = node;
+  while (current && !ts.isSourceFile(current)) {
+    fallback = current;
+    if (
+      ts.isArrowFunction(current) ||
+      ts.isFunctionDeclaration(current) ||
+      ts.isFunctionExpression(current) ||
+      ts.isMethodDeclaration(current) ||
+      ts.isArrayLiteralExpression(current)
+    ) {
+      return /-\s*32602\b/.test(current.getText(sourceFile));
+    }
+    current = current.parent;
+  }
+  return /-\s*32602\b/.test(fallback.getText(sourceFile));
+}

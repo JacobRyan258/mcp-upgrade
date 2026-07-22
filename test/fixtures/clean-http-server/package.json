@@ -3,7 +3,8 @@
   "version": "2.0.0",
   "type": "module",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/node": "^2.0.0-beta.0",
+    "@modelcontextprotocol/server": "^2.0.0-beta.0",
     "express": "^5.1.0"
   }
 }

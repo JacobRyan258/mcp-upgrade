@@ -4,30 +4,36 @@
  * The JSON report shape (`ScanReport`) is the stable public interface; this
  * module exposes the same scan the CLI runs, for embedding in other tooling.
  */
-export * from './types.js';
 export { scan, scanPath } from './api.js';
-export type { ScanPathOptions } from './api.js';
-export { ALL_RULES, ruleById } from './scanner/rules/index.js';
-export { runScan } from './scanner/engine.js';
-export type { EngineOptions, ScanResult, CommentOnlyMatch } from './scanner/engine.js';
-export { renderTextReport } from './reporters/text.js';
-export { renderJsonReport } from './reporters/json.js';
-export { renderChecklistReport } from './reporters/checklist.js';
-export { resolveOptions, runScanCommand, computeExitCode } from './cli/commands/scan.js';
-export type { RawScanOptions, ResolveExtras, ScanCommandResult } from './cli/commands/scan.js';
+export type { CommentOnlyMatch, ScanPathOptions, ScanResult } from './api.js';
+export { assertScanReport, isScanReport } from './schema.js';
+export { InternalScannerError, UsageError } from './types.js';
+export type {
+  AppsReadiness,
+  AutofixSafety,
+  Confidence,
+  DetectedDependency,
+  EffortEstimate,
+  EffortItem,
+  FileScanResult,
+  Finding,
+  FindingLevel,
+  ReadinessScore,
+  RepositoryClassification,
+  RuleSource,
+  ScanReport,
+  ScanIssue,
+  ScanIssueCode,
+  ScanStatus,
+  ScanSummary,
+  ScoreDeduction,
+  SkipReason,
+  TargetStatus,
+  TransportType,
+} from './types.js';
 export {
   SCANNER_VERSION,
   DEFAULT_TARGET_VERSION,
   BASELINE_PROTOCOL_VERSION,
-  KNOWN_TARGETS,
   RC_DISCLAIMER,
-  DEFAULT_IGNORE_PATTERNS,
-  SUPPORTED_EXTENSIONS,
-  MAX_FILE_BYTES,
-  MAX_FILES,
-  MAX_TOTAL_BYTES,
-  EXIT_OK,
-  EXIT_FINDINGS,
-  EXIT_USAGE,
-  EXIT_INTERNAL,
 } from './constants.js';
