@@ -1,5 +1,6 @@
 node_modules/
 dist/
+build/
 coverage/
 *.tgz
 .env
@@ -9,3 +10,21 @@ coverage/
 .DS_Store
 *.log
 .vitest/
+*.tsbuildinfo
+
+# Next.js
+.next/
+out/
+next-env.d.ts
+
+# Playwright
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
+# Local scan scratch space
+.scan-tmp/
+
+# Local service state
+.supabase/

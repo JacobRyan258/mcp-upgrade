@@ -1,0 +1,80 @@
+{
+  "name": "mcp-upgrade",
+  "version": "0.1.0",
+  "description": "Find what breaks before you upgrade your MCP server. Static scanner for MCP 2025-11-25 -> 2026-07-28 RC migration.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "migration",
+    "scanner",
+    "static-analysis",
+    "upgrade",
+    "compatibility",
+    "cli"
+  ],
+  "license": "MIT",
+  "author": "Jacob Ryan (https://github.com/JacobRyan258)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JacobRyan258/mcp-upgrade.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JacobRyan258/mcp-upgrade/issues"
+  },
+  "homepage": "https://github.com/JacobRyan258/mcp-upgrade#readme",
+  "type": "module",
+  "sideEffects": [
+    "./dist/cli/bin.js"
+  ],
+  "bin": {
+    "mcp-upgrade": "dist/cli/bin.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "docs/rule-matrix.md"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/make-executable.mjs",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "audit:production": "npm audit --omit=dev",
+    "check:secrets": "node scripts/check-secrets.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "tsx src/cli/bin.ts",
+    "prepare": "npm run build",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "npm run verify && npm run verify:package",
+    "verify": "npm run typecheck && npm run lint && npm run test && npm run check:secrets && npm run build",
+    "verify:package": "bash scripts/verify-package.sh"
+  },
+  "dependencies": {
+    "chalk": "^5.6.2",
+    "commander": "^14.0.1",
+    "typescript": "5.9.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/node": "^22.19.1",
+    "eslint": "^9.39.1",
+    "tsx": "^4.20.6",
+    "typescript-eslint": "^8.46.4",
+    "vitest": "^3.2.4"
+  }
+}

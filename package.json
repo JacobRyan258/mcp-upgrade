@@ -1,80 +1,55 @@
 {
-  "name": "mcp-upgrade",
-  "version": "0.1.0",
-  "description": "Find what breaks before you upgrade your MCP server. Static scanner for MCP 2025-11-25 -> 2026-07-28 RC migration.",
-  "keywords": [
-    "mcp",
-    "model-context-protocol",
-    "migration",
-    "scanner",
-    "static-analysis",
-    "upgrade",
-    "compatibility",
-    "cli"
-  ],
+  "name": "mcp-upgrade-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Monorepo for the mcp-upgrade CLI and the hosted MCP upgrade validator.",
   "license": "MIT",
   "author": "Jacob Ryan (https://github.com/JacobRyan258)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/JacobRyan258/mcp-upgrade.git"
   },
-  "bugs": {
-    "url": "https://github.com/JacobRyan258/mcp-upgrade/issues"
-  },
-  "homepage": "https://github.com/JacobRyan258/mcp-upgrade#readme",
   "type": "module",
-  "sideEffects": [
-    "./dist/cli/bin.js"
-  ],
-  "bin": {
-    "mcp-upgrade": "dist/cli/bin.js"
-  },
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    },
-    "./package.json": "./package.json"
-  },
-  "files": [
-    "dist",
-    "README.md",
-    "CHANGELOG.md",
-    "LICENSE",
-    "docs/rule-matrix.md"
-  ],
   "engines": {
     "node": ">=22.12.0"
   },
+  "workspaces": [
+    "packages/scanner",
+    "packages/shared",
+    "packages/database",
+    "apps/worker",
+    "apps/web"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node scripts/make-executable.mjs",
-    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint .",
+    "build": "npm run build --workspace @mcp-upgrade/shared && npm run build --workspace mcp-upgrade && npm run build --workspace @mcp-upgrade/database && npm run build --workspace @mcp-upgrade/worker && npm run build --workspace @mcp-upgrade/web",
+    "build:libs": "npm run build --workspace @mcp-upgrade/shared && npm run build --workspace mcp-upgrade && npm run build --workspace @mcp-upgrade/database",
+    "clean": "node scripts/clean.mjs",
+    "typecheck": "npm run typecheck --workspace @mcp-upgrade/shared && npm run typecheck --workspace mcp-upgrade && npm run typecheck --workspace @mcp-upgrade/database && npm run typecheck --workspace @mcp-upgrade/worker && npm run typecheck --workspace @mcp-upgrade/web",
+    "lint": "npm run lint --workspace mcp-upgrade && npm run lint --workspace @mcp-upgrade/shared && npm run lint --workspace @mcp-upgrade/database && npm run lint --workspace @mcp-upgrade/worker && npm run lint --workspace @mcp-upgrade/web",
+    "test": "npm run test --workspace mcp-upgrade && npm run test --workspace @mcp-upgrade/shared && npm run test --workspace @mcp-upgrade/database && npm run test --workspace @mcp-upgrade/worker && npm run test --workspace @mcp-upgrade/web",
+    "test:scanner": "npm run test --workspace mcp-upgrade",
+    "test:e2e": "npm run test:e2e --workspace @mcp-upgrade/web",
+    "check:secrets": "node packages/scanner/scripts/check-secrets.mjs .",
     "audit:production": "npm audit --omit=dev",
-    "check:secrets": "node scripts/check-secrets.mjs",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "dev": "tsx src/cli/bin.ts",
-    "prepare": "npm run build",
-    "prepack": "npm run clean && npm run build",
-    "prepublishOnly": "npm run verify && npm run verify:package",
+    "db:migrate": "npm run migrate --workspace @mcp-upgrade/database",
+    "db:reset": "npm run reset --workspace @mcp-upgrade/database",
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "npm run dev --workspace @mcp-upgrade/web",
+    "dev:worker": "npm run dev --workspace @mcp-upgrade/worker",
     "verify": "npm run typecheck && npm run lint && npm run test && npm run check:secrets && npm run build",
-    "verify:package": "bash scripts/verify-package.sh"
-  },
-  "dependencies": {
-    "chalk": "^5.6.2",
-    "commander": "^14.0.1",
-    "typescript": "5.9.3"
+    "verify:package": "npm run verify:package --workspace mcp-upgrade"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
     "@types/node": "^22.19.1",
     "eslint": "^9.39.1",
     "tsx": "^4.20.6",
+    "typescript": "5.9.3",
     "typescript-eslint": "^8.46.4",
     "vitest": "^3.2.4"
+  },
+  "overrides": {
+    "postcss": "^8.5.22",
+    "sharp": "^0.35.3"
   }
 }

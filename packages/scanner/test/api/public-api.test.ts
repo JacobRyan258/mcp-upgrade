@@ -29,9 +29,22 @@ describe('public package API', () => {
       'UsageError',
       'assertScanReport',
       'isScanReport',
+      'redact',
+      'sanitizeReportText',
       'scan',
       'scanPath',
+      'toEvidence',
     ]);
+  });
+
+  it('exposes redaction that embedders can re-apply at their own boundary', () => {
+    const secret = 'sk-live-6f3aB9xQ2mZ7pL0wN4tR8vK1cD5eH2jS';
+    expect(publicApi.redact(`const key = "${secret}";`)).not.toContain(secret);
+    expect(publicApi.redact(`const key = "${secret}";`)).toContain('[REDACTED:');
+    // Report text is flattened so hostile metadata cannot forge extra records.
+    expect(publicApi.sanitizeReportText('a\nb\tc')).toBe('a b c');
+    expect(publicApi.toEvidence('  let   x = 1  ')).toBe('let x = 1');
+    expect(publicApi.toEvidence('x'.repeat(500)).length).toBeLessThanOrEqual(160);
   });
 
   it('returns reports that satisfy the runtime schema guard', async () => {
@@ -168,13 +181,23 @@ describe('public package API', () => {
   });
 
   it('keeps package and lockfile entrypoint metadata in sync', async () => {
+    // This package lives in a workspace, so the lockfile is at the monorepo
+    // root and describes this package under its workspace path. The invariant
+    // being protected is unchanged: the published version and bin entry must
+    // match what the lockfile records.
     const packageJson = JSON.parse(await readFile(path.join(ROOT, 'package.json'), 'utf8'));
-    const packageLock = JSON.parse(await readFile(path.join(ROOT, 'package-lock.json'), 'utf8'));
+    const packageLock = JSON.parse(
+      await readFile(path.join(ROOT, '..', '..', 'package-lock.json'), 'utf8'),
+    );
+    const workspaceEntry = packageLock.packages['packages/scanner'];
 
     expect(packageJson.version).toBe(SCANNER_VERSION);
-    expect(packageLock.version).toBe(SCANNER_VERSION);
-    expect(packageLock.packages[''].version).toBe(SCANNER_VERSION);
-    expect(packageLock.packages[''].bin).toEqual(packageJson.bin);
+    expect(workspaceEntry).toBeDefined();
+    expect(workspaceEntry.name).toBe('mcp-upgrade');
+    expect(workspaceEntry.version).toBe(SCANNER_VERSION);
+    expect(workspaceEntry.bin).toEqual(packageJson.bin);
+    // The root manifest is a private workspace root and must never be publishable.
+    expect(packageLock.packages[''].name).toBe('mcp-upgrade-monorepo');
     expect(packageJson.type).toBe('module');
     expect(packageJson.exports['.'].import).toBe('./dist/index.js');
     expect(packageJson.exports['.']).not.toHaveProperty('require');

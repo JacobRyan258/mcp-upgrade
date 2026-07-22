@@ -1,0 +1,41 @@
+{
+  "name": "@mcp-upgrade/worker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Isolated scanning worker. Ingests untrusted archives, runs the scanner, publishes sanitized reports.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/main.js",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "start": "node dist/main.js",
+    "dev": "tsx watch src/main.ts"
+  },
+  "dependencies": {
+    "@mcp-upgrade/database": "*",
+    "@mcp-upgrade/shared": "*",
+    "mcp-upgrade": "*",
+    "pg": "^8.22.0",
+    "yauzl": "^3.4.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/node": "^22.19.1",
+    "@types/pg": "^8.20.0",
+    "@types/yauzl": "^3.4.0",
+    "eslint": "^9.39.1",
+    "tsx": "^4.20.6",
+    "typescript": "5.9.3",
+    "typescript-eslint": "^8.46.4",
+    "vitest": "^3.2.4",
+    "yazl": "^3.3.1"
+  }
+}
