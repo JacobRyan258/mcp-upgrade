@@ -134,6 +134,7 @@ export async function discover(options: ResolvedScanOptions): Promise<DiscoveryR
     : await globCandidates(realRoot, options);
 
   const prepared: PreparedFile[] = [];
+  let totalBytes = 0;
 
   for (const candidate of candidates) {
     const ext = extensionOf(candidate.relPath);
@@ -171,6 +172,12 @@ export async function discover(options: ResolvedScanOptions): Promise<DiscoveryR
       continue;
     }
 
+    // Whole-scan budgets, reported honestly rather than truncated silently.
+    if (prepared.length >= options.maxFiles || totalBytes + size > options.maxTotalBytes) {
+      skipped.push({ relPath: candidate.relPath, reason: 'scan-limit', size });
+      continue;
+    }
+
     let buffer: Buffer;
     try {
       buffer = await fs.readFile(candidate.absPath);
@@ -185,6 +192,7 @@ export async function discover(options: ResolvedScanOptions): Promise<DiscoveryR
       continue;
     }
 
+    totalBytes += size;
     const content = buffer.toString('utf8');
     prepared.push(prepareFile(candidate, ext, kind, content, size));
   }
@@ -218,6 +226,9 @@ async function globCandidates(
       suppressErrors: true,
       absolute: false,
       unique: true,
+      // `Server.TS` is still a TypeScript file; extension handling downstream
+      // lowercases, so discovery must match the same set.
+      caseSensitiveMatch: false,
     },
   );
 

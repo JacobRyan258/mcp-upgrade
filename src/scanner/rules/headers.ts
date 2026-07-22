@@ -3,7 +3,14 @@ import { DEFAULT_TARGET_VERSION, SOURCES } from '../../constants.js';
 import type { Finding, PreparedFile, ScanContext, ScannerRule } from '../../types.js';
 import { calleeName, collectHeaderAccess, getSourceFile, propertyKeyText, walk } from '../ast.js';
 import { isInComment, offsetToPosition } from '../discovery.js';
-import { buildFinding, dedupeByLocation, filesFor, matches } from './helpers.js';
+import {
+  buildFinding,
+  dedupeByLocation,
+  fileHasMcpSignal,
+  filesFor,
+  inMcpContext,
+  matches,
+} from './helpers.js';
 
 /**
  * Group 2 — Streamable HTTP request headers (SEP-2243).
@@ -108,9 +115,13 @@ function findMcpRequestSites(file: PreparedFile, sourceFile: ts.SourceFile): Mcp
   return sites;
 }
 
-/** Pulls a literal `method: "tools/call"` out of a request body. */
+/**
+ * Pulls a literal `method: "tools/call"` out of a request body. The key may
+ * itself be quoted — bodies written as JSON strings or template-literal JSON
+ * (`"method":"tools/call"`) count the same as object literals.
+ */
 function extractLiteralMethod(text: string): string | null {
-  const pattern = /\bmethod\s*:\s*['"`]([a-z][a-z0-9]*(?:\/[a-z][a-zA-Z0-9]*)+)['"`]/;
+  const pattern = /['"`\\]?\bmethod['"`\\]?\s*:\s*\\?['"`]([a-z][a-z0-9]*(?:\/[a-z][a-zA-Z0-9]*)+)\\?['"`]/;
   const match = pattern.exec(text);
   if (!match) return null;
   const method = match[1];
@@ -143,6 +154,11 @@ export const missingRequestHeadersRule: ScannerRule = {
     const abstracted = context.repository.httpRoutingIsAbstracted;
 
     for (const file of filesFor(this, context)) {
+      // Generic method names (`tasks/get`, `tasks/cancel`) also occur in
+      // non-MCP internal RPC layers; without any MCP signal in the repository
+      // or file, a missing MCP header is not a defect.
+      if (!inMcpContext(context, file)) continue;
+
       const sourceFile = getSourceFile(file);
       if (!sourceFile) continue;
 
@@ -202,7 +218,7 @@ export const missingRequestHeadersRule: ScannerRule = {
 /* -------------------------------------------------------------------------- */
 
 const MCP_ROUTE_PATTERN =
-  /\b(?:app|router|server)\.(?:post|all|use)\s*\(\s*['"`]([^'"`]*mcp[^'"`]*)['"`]/gi;
+  /\b(?:app|router|server)\.(?:post|all|use)\s*\(\s*['"`]([^'"`]*[/._-]mcp(?:[/._-][^'"`]*)?)['"`]/gi;
 
 const NEXT_ROUTE_PATTERN = /\bexport\s+(?:const|async\s+function|function)\s+POST\b/g;
 
@@ -224,11 +240,11 @@ export const unvalidatedHeadersRule: ScannerRule = {
     const findings: Finding[] = [];
 
     // Header validation is frequently factored into its own module, and this
-    // scanner does not follow values across files. If *any* scanned file names
-    // a routing header, assume the repository handles them and stay quiet:
-    // a review item pointing at a route whose validation lives one import away
-    // is noise, and noise is what makes a scanner get ignored.
-    if (context.files.some((file) => /['"`]mcp-(?:method|name)['"`]/i.test(file.content))) {
+    // scanner does not follow values across files. If any scanned file names
+    // a routing header *outside a comment*, assume the repository handles them
+    // and stay quiet: a review item pointing at a route whose validation lives
+    // one import away is noise, and noise is what makes a scanner get ignored.
+    if (context.files.some((file) => mentionsRoutingHeaderInCode(file))) {
       context.trace(`  rule ${this.id}: suppressed — routing headers are handled somewhere in this repository`);
       return findings;
     }
@@ -239,7 +255,9 @@ export const unvalidatedHeadersRule: ScannerRule = {
 
       const routeHits = [
         ...matches(context, this, file, MCP_ROUTE_PATTERN),
-        ...matches(context, this, file, NEXT_ROUTE_PATTERN),
+        // A bare `export function POST` is every Next.js API route, MCP or
+        // not; without an MCP signal in the file it is not an MCP endpoint.
+        ...(fileHasMcpSignal(file) ? matches(context, this, file, NEXT_ROUTE_PATTERN) : []),
       ];
 
       for (const { hit } of routeHits) {
@@ -345,6 +363,16 @@ export const headersImplementedRule: ScannerRule = {
 };
 
 /* -------------------------------------------------------------------------- */
+
+/** A routing-header literal that is live code, not a commented-out line. */
+function mentionsRoutingHeaderInCode(file: PreparedFile): boolean {
+  const pattern = /['"`]mcp-(?:method|name)['"`]/gi;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(file.content)) !== null) {
+    if (!isInComment(file, match.index)) return true;
+  }
+  return false;
+}
 
 /** Exported for tests: reads a property key from an object literal. */
 export function readPropertyKey(node: ts.PropertyAssignment): string | null {

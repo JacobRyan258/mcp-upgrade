@@ -1,11 +1,18 @@
 import ts from 'typescript';
 import { DEFAULT_TARGET_VERSION, SOURCES } from '../../constants.js';
-import type { Finding, ScanContext, ScannerRule } from '../../types.js';
-import { collectHeaderAccess, collectPropertyPaths, getSourceFile, walk } from '../ast.js';
+import type { Finding, PreparedFile, ScanContext, ScannerRule } from '../../types.js';
+import {
+  collectHeaderAccess,
+  collectPropertyPaths,
+  getSourceFile,
+  isInsideMultilineTemplate,
+  walk,
+} from '../ast.js';
 import { isInComment, offsetToPosition } from '../discovery.js';
 import {
   buildFinding,
   dedupeByLocation,
+  fileHasMcpSignal,
   filesFor,
   hasContextNear,
   identifierLiteral,
@@ -94,13 +101,39 @@ export const sessionHeaderRule: ScannerRule = {
 
       // Config files and any access shape the AST pass did not recognise.
       for (const { hit } of matches(context, this, file, /['"`]mcp-session-id['"`]/gi)) {
+        const documentation =
+          sourceFile !== null &&
+          isInsideMultilineTemplate(sourceFile, file.content, hit.offset);
         findings.push(
           buildFinding(this, hit, {
             explanation: STATELESS_EXPLANATION,
             remediation: STATELESS_REMEDIATION,
             transportApplicability: 'streamable-http',
+            // A multi-line template string is usually prose or generated text,
+            // not header handling; keep the location visible but do not assert.
+            ...(documentation
+              ? {
+                  level: 'review' as const,
+                  confidence: 'low' as const,
+                  title: 'Mcp-Session-Id literal inside a multi-line template string',
+                }
+              : {}),
           }),
         );
+      }
+
+      // YAML never quotes header names in practice (`mcp-session-id: pass`),
+      // so the quoted pattern alone misses plain scalars.
+      if (file.kind === 'yaml') {
+        for (const { hit } of matches(context, this, file, /(?<!['"`\w-])mcp-session-id(?![\w-])/gi)) {
+          findings.push(
+            buildFinding(this, hit, {
+              explanation: STATELESS_EXPLANATION,
+              remediation: STATELESS_REMEDIATION,
+              transportApplicability: 'streamable-http',
+            }),
+          );
+        }
       }
     }
 
@@ -197,19 +230,26 @@ export const sessionTransportOptionsRule: ScannerRule = {
 /* MCP2026-SESSION-003 — session-keyed state                                   */
 /* -------------------------------------------------------------------------- */
 
+// Quantifiers are bounded because these run over hostile input; the unbounded
+// \w* forms are quadratic on long identifier runs.
 const SESSION_STORE_PATTERNS: RegExp[] = [
-  /\bnew\s+Map\s*<\s*string\s*,\s*\w*(?:Transport|Server|Session)\w*\s*>/g,
+  /\bnew\s+Map\s*<\s*string\s*,\s*\w{0,64}(?:Transport|Server|Session)\w{0,64}\s*>/g,
   /\b(?:transports|sessions|sessionStore|sessionMap|activeSessions|mcpSessions)\s*(?::|=)/g,
-  /\b(?:transports|sessions|sessionStore|sessionMap|activeSessions|mcpSessions)\s*\[\s*\w*[sS]ession\w*\s*\]/g,
-  /\bdelete\s+\w+\s*\[\s*\w*[sS]essionId\w*\s*\]/g,
+  /\b(?:transports|sessions|sessionStore|sessionMap|activeSessions|mcpSessions)\s*\[\s*\w{0,64}[sS]ession\w{0,64}\s*\]/g,
+  /\bdelete\s+\w{1,64}\s*\[\s*\w{0,64}[sS]essionId\w{0,64}\s*\]/g,
 ];
 
+/**
+ * Needles that cannot be satisfied by the matched store pattern itself —
+ * ordinary web-session code (express-session, cookie stores) matches the store
+ * patterns but has no MCP vocabulary anywhere near them.
+ */
 const SESSION_CONTEXT_NEEDLES = [
-  'sessionid',
   'mcp-session-id',
-  'transport',
   'streamablehttp',
   'mcpserver',
+  'modelcontextprotocol',
+  'mcp',
 ];
 
 export const sessionStateRule: ScannerRule = {
@@ -235,7 +275,12 @@ export const sessionStateRule: ScannerRule = {
     for (const file of filesFor(this, context)) {
       for (const pattern of SESSION_STORE_PATTERNS) {
         for (const { hit } of matches(context, this, file, pattern)) {
-          if (!hasContextNear(file, hit.offset, SESSION_CONTEXT_NEEDLES)) continue;
+          if (
+            !hasContextNear(file, hit.offset, SESSION_CONTEXT_NEEDLES, 400, hit.endOffset) &&
+            !fileHasMcpSignal(file)
+          ) {
+            continue;
+          }
           findings.push(
             buildFinding(this, hit, {
               explanation:
@@ -267,7 +312,7 @@ export const sessionStateRule: ScannerRule = {
 const STICKY_CONFIG_PATTERNS: RegExp[] = [
   /\bsessionAffinity\b/g,
   /\bstickySessions?\b/gi,
-  /\baffinity\s*:\s*['"`]?(?:cookie|client-?ip|ClientIP)/gi,
+  /\baffinity['"]?\s*:\s*['"`]?(?:cookie|client-?ip|ClientIP)/gi,
   /\bip_hash\b/g,
   /\bnginx\.ingress\.kubernetes\.io\/affinity\b/g,
   /\bservice\.spec\.sessionAffinity\b/g,
@@ -328,8 +373,17 @@ export const stickySessionConfigRule: ScannerRule = {
 const LIFECYCLE_METHOD_LITERALS = ['initialize', 'notifications/initialized'];
 const LIFECYCLE_SDK_IDENTIFIERS = ['InitializeRequestSchema', 'InitializedNotificationSchema'];
 
-/** Calls whose first string argument names the method being handled. */
-const HANDLER_CALLS = /(^|\.)(setRequestHandler|setNotificationHandler|onRequest|onNotification|handle|on)$/;
+/**
+ * Calls whose first string argument names the method being handled.
+ *
+ * The strict set is MCP-specific vocabulary and always counts. The generic
+ * set (`on`, `handle`) matches every EventEmitter, WebSocket and command bus
+ * in JavaScript, so it only counts in a file that shows an MCP signal —
+ * `emitter.on('initialize')` in a non-MCP repository is not a lifecycle
+ * handler, and `ws.on('ping')` is a heartbeat.
+ */
+const STRICT_HANDLER_CALLS = /(^|\.)(setRequestHandler|setNotificationHandler|onRequest|onNotification)$/;
+const GENERIC_HANDLER_CALLS = /(^|\.)(handle|on)$/;
 
 export const initializationLifecycleRule: ScannerRule = {
   id: 'MCP2026-LIFECYCLE-001',
@@ -376,12 +430,22 @@ export const initializationLifecycleRule: ScannerRule = {
       // own, while bare `initialize` needs a handler registration around it.
       for (const { hit } of matches(context, this, file, quotedLiteral(LIFECYCLE_METHOD_LITERALS))) {
         const literal = hit.text.slice(1, -1);
-        if (literal === 'initialize' && !isMethodHandlerArgument(sourceFile, hit.offset)) continue;
+        if (literal === 'initialize' && !isMethodHandlerArgument(sourceFile, file, hit.offset)) {
+          continue;
+        }
+        const documentation = isInsideMultilineTemplate(sourceFile, file.content, hit.offset);
         findings.push(
           buildFinding(this, hit, {
             explanation,
             remediation,
             title: `Handling of the removed "${literal}" lifecycle method`,
+            ...(documentation
+              ? {
+                  level: 'review' as const,
+                  confidence: 'low' as const,
+                  title: `"${literal}" literal inside a multi-line template string`,
+                }
+              : {}),
           }),
         );
       }
@@ -411,22 +475,31 @@ export const initializationLifecycleRule: ScannerRule = {
  * handler-registration call. This is what separates `setRequestHandler('initialize', …)`
  * from an unrelated `initialize()` helper or a config key called "initialize".
  */
-function isMethodHandlerArgument(sourceFile: ts.SourceFile, offset: number): boolean {
+function isMethodHandlerArgument(
+  sourceFile: ts.SourceFile,
+  file: PreparedFile,
+  offset: number,
+): boolean {
   let found = false;
+  const allowGeneric = fileHasMcpSignal(file);
   walk(sourceFile, (node) => {
     if (found || !ts.isCallExpression(node)) return;
     const first = node.arguments[0];
     if (!first || !ts.isStringLiteralLike(first)) return;
     if (first.getStart(sourceFile, false) !== offset) return;
     const name = expressionName(node.expression);
-    if (HANDLER_CALLS.test(name)) found = true;
+    if (STRICT_HANDLER_CALLS.test(name)) found = true;
+    else if (allowGeneric && GENERIC_HANDLER_CALLS.test(name)) found = true;
   });
   return found;
 }
 
-function expressionName(node: ts.Expression): string {
+function expressionName(node: ts.Expression, depth = 0): string {
+  if (depth > 64) return '';
   if (ts.isIdentifier(node)) return node.text;
-  if (ts.isPropertyAccessExpression(node)) return `${expressionName(node.expression)}.${node.name.text}`;
+  if (ts.isPropertyAccessExpression(node)) {
+    return `${expressionName(node.expression, depth + 1)}.${node.name.text}`;
+  }
   return '';
 }
 
@@ -497,12 +570,25 @@ export const removedCoreMethodsRule: ScannerRule = {
 
         for (const { hit } of matches(context, this, file, quotedLiteral([removed.method]))) {
           // `ping` is a common word; require a handler or call context.
-          if (removed.method === 'ping' && !isMethodHandlerArgument(sourceFile, hit.offset)) continue;
+          if (
+            removed.method === 'ping' &&
+            !isMethodHandlerArgument(sourceFile, file, hit.offset)
+          ) {
+            continue;
+          }
+          const documentation = isInsideMultilineTemplate(sourceFile, file.content, hit.offset);
           findings.push(
             buildFinding(this, hit, {
               explanation,
               remediation: removed.replacement,
               title: `Removed core RPC "${removed.method}"`,
+              ...(documentation
+                ? {
+                    level: 'review' as const,
+                    confidence: 'low' as const,
+                    title: `"${removed.method}" literal inside a multi-line template string`,
+                  }
+                : {}),
             }),
           );
         }
@@ -589,7 +675,9 @@ const REMOVED_MECHANICS: RemovedMechanic[] = [
       'use the Tasks extension (io.modelcontextprotocol/tasks) instead.',
   },
   {
-    pattern: /\b(?:app|router|server)\.delete\s*\(\s*['"`][^'"`]*mcp[^'"`]*['"`]/gi,
+    // `mcp` must be a path segment or hyphenated word — `/mcp`, `/api/mcp-server` —
+    // never a bare substring (`/mcpanel`, `/team/mcpherson`).
+    pattern: /\b(?:app|router|server)\.delete\s*\(\s*['"`][^'"`]*[/._-]mcp(?:[/._-]|['"`])/gi,
     title: 'HTTP DELETE session-termination route',
     what:
       'HTTP DELETE terminated a session in protocol versions 2025-03-26 through 2025-11-25. With ' +
@@ -600,7 +688,7 @@ const REMOVED_MECHANICS: RemovedMechanic[] = [
       'terminate.',
   },
   {
-    pattern: /\b(?:app|router|server)\.get\s*\(\s*['"`][^'"`]*mcp[^'"`]*['"`]/gi,
+    pattern: /\b(?:app|router|server)\.get\s*\(\s*['"`][^'"`]*[/._-]mcp(?:[/._-]|['"`])/gi,
     title: 'HTTP GET stream endpoint',
     what:
       'The standalone GET SSE endpoint is removed: "The MCP endpoint MUST provide a single HTTP ' +

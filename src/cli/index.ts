@@ -70,7 +70,7 @@ export function buildProgram(io: CliIo, onExitCode: (code: number) => void): Com
     .option('--ci', 'Return a nonzero exit code for confirmed incompatibilities')
     .option('--fail-on <level>', 'Failure threshold with --ci: error | warning | review', 'error')
     .option('--no-color', 'Disable ANSI terminal formatting')
-    .option('--verbose', 'Show files scanned and rule execution details')
+    .option('--verbose', 'Show files scanned and rule execution details (text format only)')
     .configureOutput({ writeOut: io.stdout, writeErr: io.stderr })
     .exitOverride()
     .addHelpText(
@@ -100,6 +100,13 @@ export async function main(argv: string[] = process.argv, io: CliIo = defaultIo)
   const program = buildProgram(io, (code) => {
     exitCode = code;
   });
+
+  // Bare invocation is a usage error, not a successful run: print help but
+  // exit 2, so scripts that forgot their arguments fail loudly.
+  if (argv.length <= 2) {
+    io.stderr(`${program.helpInformation()}\n`);
+    return EXIT_USAGE;
+  }
 
   try {
     await program.parseAsync(argv);

@@ -13,7 +13,17 @@
     "cli"
   ],
   "license": "MIT",
+  "author": "Jacob Ryan (https://github.com/JacobRyan258)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JacobRyan258/mcp-upgrade.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JacobRyan258/mcp-upgrade/issues"
+  },
+  "homepage": "https://github.com/JacobRyan258/mcp-upgrade#readme",
   "type": "module",
+  "sideEffects": false,
   "bin": {
     "mcp-upgrade": "dist/cli/bin.js"
   },
@@ -22,8 +32,10 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -42,7 +54,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "dev": "tsx src/cli/index.ts",
+    "dev": "tsx src/cli/bin.ts",
     "prepack": "npm run clean && npm run build",
     "verify": "npm run typecheck && npm run lint && npm run test && npm run build"
   },

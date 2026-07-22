@@ -53,7 +53,12 @@ const SSE_SIGNALS: Signal[] = [
 /** Something is serving HTTP, but not through a recognised MCP transport. */
 const CUSTOM_HTTP_SIGNALS: Signal[] = [
   { pattern: /\bcreateServer\s*\(/, label: 'http.createServer()' },
-  { pattern: /\bapp\.(?:post|use|all)\s*\(\s*['"`][^'"`]*mcp/i, label: 'MCP HTTP route' },
+  // `mcp` must be its own path segment or word: `/mcp`, `/api/mcp-server` —
+  // never `/mcpanel` or `/team/mcpherson`.
+  {
+    pattern: /\bapp\.(?:post|use|all)\s*\(\s*['"`][^'"`]*(?:^|[/._-])mcp(?:[/._-]|['"`])/i,
+    label: 'MCP HTTP route',
+  },
   { pattern: /\bexport\s+(?:async\s+)?function\s+POST\b/, label: 'HTTP POST route handler export' },
   { pattern: /\bexport\s+const\s+POST\b/, label: 'HTTP POST route handler export' },
 ];
@@ -160,18 +165,6 @@ const MCP_CODE_SIGNALS: Signal[] = [
   { pattern: /\bFastMCP\b/, label: 'FastMCP' },
 ];
 
-/**
- * Renders a scan target for display. A relative path reads well when the target
- * is nearby, but degrades into a wall of `../` when it is not — so the absolute
- * path wins whenever it is shorter.
- */
-function displayPath(target: string): string {
-  const relative = path.relative(process.cwd(), target);
-  if (relative === '') return '.';
-  if (relative.startsWith('..') && relative.length >= target.length) return target;
-  return relative;
-}
-
 export async function classify(
   files: PreparedFile[],
   options: ResolvedScanOptions,
@@ -227,7 +220,7 @@ export async function classify(
   }
 
   return {
-    root: displayPath(options.singleFilePath ?? options.rootDir),
+    root: options.displayRoot,
     singleFile: options.singleFilePath !== null,
     isLikelyMcpServer: mcpEvidence.length > 0,
     mcpEvidence,

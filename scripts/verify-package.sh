@@ -40,6 +40,56 @@ if [ -x "$CLI" ]; then ok "packaged CLI is executable"; else bad "packaged CLI i
 note "CLI basics"
 "$CLI" --help    >/dev/null && ok "--help"    || bad "--help"
 "$CLI" --version >/dev/null && ok "--version" || bad "--version"
+set +e
+"$CLI" >/dev/null 2>&1; [ $? -eq 2 ] && ok "bare invocation exits 2" || bad "bare invocation did not exit 2"
+set -e
+
+FIXTURES="$ROOT/test/fixtures"
+
+note "Programmatic API from the installed package"
+cd "$WORK/consumer"
+node --input-type=module -e "
+import { scanPath, SCANNER_VERSION, ALL_RULES } from 'mcp-upgrade';
+if (typeof scanPath !== 'function') throw new Error('scanPath missing');
+if (!SCANNER_VERSION) throw new Error('SCANNER_VERSION missing');
+if (!Array.isArray(ALL_RULES) || ALL_RULES.length === 0) throw new Error('ALL_RULES missing');
+const report = await scanPath({ path: '$FIXTURES/legacy-session-server' });
+if (report.schemaVersion !== '1.0') throw new Error('unexpected schemaVersion');
+if (report.summary.counts.error < 1) throw new Error('expected findings from fixture');
+if (report.scannerVersion !== SCANNER_VERSION) throw new Error('version mismatch');
+console.error('esm scanPath ok:', report.summary.counts.error, 'errors');
+" 2>/dev/null && ok "ESM import + scanPath works externally" || bad "ESM import + scanPath failed"
+
+node -e "
+const pkg = require('mcp-upgrade');
+if (typeof pkg.scanPath !== 'function') throw new Error('scanPath missing via require');
+" 2>/dev/null && ok "CJS require() works (require(esm))" || bad "CJS require() failed"
+
+cat > "$WORK/consumer/types-check.ts" <<'TS'
+import { scanPath } from 'mcp-upgrade';
+import type { ScanReport, Finding, ScanPathOptions } from 'mcp-upgrade';
+const options: ScanPathOptions = { path: '.', minimumConfidence: 'high' };
+export async function run(): Promise<ScanReport> {
+  const report = await scanPath(options);
+  const findings: Finding[] = report.findings;
+  return { ...report, findings };
+}
+TS
+cat > "$WORK/consumer/tsconfig.json" <<'JSON'
+{
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "target": "ES2022",
+    "strict": true,
+    "noEmit": true
+  },
+  "include": ["types-check.ts"]
+}
+JSON
+"$ROOT/node_modules/.bin/tsc" -p "$WORK/consumer/tsconfig.json" \
+  && ok "published types compile in an external TypeScript consumer" \
+  || bad "published types failed external compilation"
 
 FIXTURES="$ROOT/test/fixtures"
 

@@ -88,9 +88,14 @@ function buildExplanation(
     .sort(([a], [b]) => a.localeCompare(b, 'en'))
     .map(([label, group]) => `${group.count} × ${label} = −${group.points}`);
 
+  const arithmetic =
+    total > STARTING_SCORE
+      ? `${STARTING_SCORE} − ${total} → ${score} (floored at 0).`
+      : `${STARTING_SCORE} − ${total} = ${score}.`;
+
   return (
     `Started at ${STARTING_SCORE}. Deductions are applied once per rule per file ` +
     `(${deductions.length} unique rule/file pairs): ${parts.join(', ')}. ` +
-    `${STARTING_SCORE} − ${total} = ${score}.`
+    arithmetic
   );
 }

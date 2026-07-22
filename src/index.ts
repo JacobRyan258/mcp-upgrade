@@ -5,6 +5,8 @@
  * module exposes the same scan the CLI runs, for embedding in other tooling.
  */
 export * from './types.js';
+export { scan, scanPath } from './api.js';
+export type { ScanPathOptions } from './api.js';
 export { ALL_RULES, ruleById } from './scanner/rules/index.js';
 export { runScan } from './scanner/engine.js';
 export type { EngineOptions, ScanResult, CommentOnlyMatch } from './scanner/engine.js';
@@ -12,6 +14,7 @@ export { renderTextReport } from './reporters/text.js';
 export { renderJsonReport } from './reporters/json.js';
 export { renderChecklistReport } from './reporters/checklist.js';
 export { resolveOptions, runScanCommand, computeExitCode } from './cli/commands/scan.js';
+export type { RawScanOptions, ResolveExtras, ScanCommandResult } from './cli/commands/scan.js';
 export {
   SCANNER_VERSION,
   DEFAULT_TARGET_VERSION,
@@ -19,6 +22,10 @@ export {
   KNOWN_TARGETS,
   RC_DISCLAIMER,
   DEFAULT_IGNORE_PATTERNS,
+  SUPPORTED_EXTENSIONS,
+  MAX_FILE_BYTES,
+  MAX_FILES,
+  MAX_TOTAL_BYTES,
   EXIT_OK,
   EXIT_FINDINGS,
   EXIT_USAGE,

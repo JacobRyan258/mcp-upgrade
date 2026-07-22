@@ -2,7 +2,7 @@ import { DEFAULT_TARGET_VERSION, SOURCES } from '../../constants.js';
 import type { Finding, ScanContext, ScannerRule } from '../../types.js';
 import { collectNumericLiterals, getSourceFile } from '../ast.js';
 import { isInComment, offsetToPosition } from '../discovery.js';
-import { buildFinding, dedupeByLocation, filesFor, hasContextNear, matches } from './helpers.js';
+import { buildFinding, dedupeByLocation, filesFor, hasContextNear } from './helpers.js';
 
 /**
  * Group 3 — resource error-code migration (SEP-2164).
@@ -78,10 +78,12 @@ export const resourceNotFoundEmitRule: ScannerRule = {
           context.noteCommentOnlyMatch(this.id, file.relPath, line, '-32002');
           continue;
         }
-        // Client-side acceptance is correct. Never a finding.
-        if (hit.usage === 'compare') continue;
+        // Client-side acceptance is correct. Never a finding. List membership
+        // is most often an acceptance list, so it goes to MCP2026-ERROR-002
+        // for review rather than being asserted here.
+        if (hit.usage === 'compare' || hit.usage === 'list') continue;
         if (hit.usage !== 'emit' && hit.usage !== 'declare') continue;
-        if (!hasContextNear(file, hit.start, RESOURCE_CONTEXT_NEEDLES)) continue;
+        if (!hasContextNear(file, hit.start, RESOURCE_CONTEXT_NEEDLES, 400, hit.end)) continue;
 
         findings.push(
           buildFinding(
@@ -128,10 +130,10 @@ export const resourceNotFoundAmbiguousRule: ScannerRule = {
     const findings: Finding[] = [];
 
     const explanation =
-      `${EXPLANATION_BASE} This occurrence has no nearby resource-handling context, so this ` +
-      'scanner cannot tell whether it is the resource-not-found code, an unrelated ' +
-      'implementation-defined error, or a client accepting the old value. It is reported for ' +
-      'review rather than treated as a break. The -32000 to -32019 range remains ' +
+      `${EXPLANATION_BASE} This occurrence could not be conclusively classified: either it has ` +
+      'no nearby resource-handling context, or it flows through a helper this scanner cannot ' +
+      'identify as emitting or accepting (a callback, a response builder, a list of codes). It ' +
+      'is reported for review rather than treated as a break. The -32000 to -32019 range remains ' +
       'implementation-defined and existing SDK usage there is explicitly grandfathered.';
 
     const remediation =
@@ -142,26 +144,27 @@ export const resourceNotFoundAmbiguousRule: ScannerRule = {
 
     for (const file of filesFor(this, context)) {
       const sourceFile = getSourceFile(file);
+      if (!sourceFile) continue;
 
-      if (sourceFile) {
-        for (const hit of collectNumericLiterals(sourceFile, -32002)) {
-          if (isInComment(file, hit.start)) continue;
-          if (hit.usage === 'compare') continue;
-          if (hasContextNear(file, hit.start, RESOURCE_CONTEXT_NEEDLES)) continue;
-          findings.push(
-            buildFinding(
-              this,
-              { file, offset: hit.start, endOffset: hit.end, text: '-32002' },
-              { explanation, remediation },
-            ),
-          );
-        }
-        continue;
-      }
+      for (const hit of collectNumericLiterals(sourceFile, -32002)) {
+        if (isInComment(file, hit.start)) continue;
+        // Comparisons are correct forward-compatible client behaviour.
+        if (hit.usage === 'compare') continue;
+        // Emissions and declarations with resource context are MCP2026-ERROR-001's
+        // to assert; everything else — unknown usage anywhere, list membership,
+        // and emit/declare with no resource context — needs a human.
+        const assertedByEmitRule =
+          (hit.usage === 'emit' || hit.usage === 'declare') &&
+          hasContextNear(file, hit.start, RESOURCE_CONTEXT_NEEDLES, 400, hit.end);
+        if (assertedByEmitRule) continue;
 
-      // JSON has no AST pass; match the literal directly.
-      for (const { hit } of matches(context, this, file, /(?<![\d.])-32002(?![\d.])/g)) {
-        findings.push(buildFinding(this, hit, { explanation, remediation }));
+        findings.push(
+          buildFinding(
+            this,
+            { file, offset: hit.start, endOffset: hit.end, text: '-32002' },
+            { explanation, remediation },
+          ),
+        );
       }
     }
 

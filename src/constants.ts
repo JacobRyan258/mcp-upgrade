@@ -109,6 +109,15 @@ export const SUPPORTED_EXTENSIONS = [
 /** Files larger than this are skipped and reported. */
 export const MAX_FILE_BYTES = 1_048_576; // 1 MiB
 
+/**
+ * Resource budgets for a whole scan. A scanned repository is untrusted input;
+ * without these a pathological tree could exhaust memory. Files beyond either
+ * budget are reported skipped with reason `scan-limit`, never silently
+ * dropped.
+ */
+export const MAX_FILES = 20_000;
+export const MAX_TOTAL_BYTES = 134_217_728; // 128 MiB
+
 /** Bytes inspected when deciding whether a file is binary. */
 export const BINARY_SNIFF_BYTES = 8192;
 

@@ -1,12 +1,14 @@
 import { DEFAULT_TARGET_VERSION, SOURCES } from '../../constants.js';
 import type { Finding, ScanContext, ScannerRule } from '../../types.js';
-import { collectPropertyPaths, getSourceFile } from '../ast.js';
+import { collectCalls, collectPropertyPaths, getSourceFile } from '../ast.js';
 import { isInComment, offsetToPosition } from '../discovery.js';
 import {
   buildFinding,
   dedupeByLocation,
   filesFor,
+  hasContextNear,
   identifierLiteral,
+  inMcpContext,
   matches,
   quotedLiteral,
 } from './helpers.js';
@@ -51,19 +53,33 @@ const SAMPLING_IDENTIFIERS = [
   'ModelHint',
 ];
 
-/** Call shapes that initiate an MCP Sampling request. */
-const SAMPLING_CALLS = [
-  /\b(?:server|mcpServer|this)\.createMessage\s*\(/g,
-  /\bctx\.mcpReq\.requestSampling\s*\(/g,
-  /\brequestSampling\s*\(/g,
+/**
+ * Callee shapes that initiate an MCP Sampling request. Matched against actual
+ * call expressions (never declarations), and only in files with an MCP signal:
+ * `createMessage` and `requestSampling` are ordinary identifiers elsewhere.
+ */
+const SAMPLING_CALL_NAMES = [
+  /^(?:server|mcpServer|this)\.createMessage$/,
+  /(^|\.)requestSampling$/,
 ];
 
 /**
- * Only a genuine top-level capability declaration counts. A nested key such as
- * `capabilities.tasks.requests.sampling` is a different feature and is handled by
- * its own rule.
+ * A `capabilities.sampling` path is self-evidencing. A bare top-level
+ * `sampling` key is not — tracing configs declare sampling rates — so it only
+ * counts with capability/MCP vocabulary nearby, and only as the exact key
+ * (never `sampling.rate` descendants). Nested keys such as
+ * `capabilities.tasks.requests.sampling` are a different feature owned by the
+ * tasks rules.
  */
-const SAMPLING_CAPABILITY_PATHS = [/^capabilities\.sampling(\.|$)/, /^sampling(\.|$)/];
+const SAMPLING_CAPABILITY_PATH = /(^|\.)capabilities\.sampling(\.|$)/;
+const SAMPLING_BARE_PATH = /^sampling$/;
+const CAPABILITY_CONTEXT_NEEDLES = [
+  'capabilities',
+  'clientcapabilities',
+  'servercapabilities',
+  'mcp',
+  'modelcontextprotocol',
+];
 
 export const samplingDeprecationRule: ScannerRule = {
   id: 'MCP2026-SAMPLING-001',
@@ -88,6 +104,10 @@ export const samplingDeprecationRule: ScannerRule = {
     for (const file of filesFor(this, context)) {
       const sourceFile = getSourceFile(file);
 
+      // Sampling vocabulary is ordinary vocabulary elsewhere; without an MCP
+      // signal in the repository or file, nothing here is MCP Sampling.
+      if (!inMcpContext(context, file)) continue;
+
       for (const { hit } of matches(context, this, file, quotedLiteral(SAMPLING_METHOD_LITERALS))) {
         findings.push(
           buildFinding(this, hit, {
@@ -108,22 +128,31 @@ export const samplingDeprecationRule: ScannerRule = {
         );
       }
 
-      for (const pattern of SAMPLING_CALLS) {
-        for (const { hit } of matches(context, this, file, pattern)) {
-          findings.push(
-            buildFinding(this, hit, {
+      if (!sourceFile) continue;
+
+      for (const call of collectCalls(sourceFile)) {
+        if (!SAMPLING_CALL_NAMES.some((pattern) => pattern.test(call.name))) continue;
+        if (isInComment(file, call.start)) continue;
+        findings.push(
+          buildFinding(
+            this,
+            { file, offset: call.start, endOffset: call.end, text: call.name },
+            {
               title: 'Server-initiated LLM call through deprecated MCP Sampling',
               explanation: DEPRECATION_STATEMENT,
               remediation: MIGRATION_GUIDANCE,
               confidence: 'high',
-            }),
-          );
-        }
+            },
+          ),
+        );
       }
 
-      if (!sourceFile) continue;
       for (const property of collectPropertyPaths(sourceFile)) {
-        if (!SAMPLING_CAPABILITY_PATHS.some((pattern) => pattern.test(property.path))) continue;
+        const explicit = SAMPLING_CAPABILITY_PATH.test(property.path);
+        const bare =
+          SAMPLING_BARE_PATH.test(property.path) &&
+          hasContextNear(file, property.start, CAPABILITY_CONTEXT_NEEDLES, 400, property.end);
+        if (!explicit && !bare) continue;
         if (isInComment(file, property.start)) {
           const { line } = offsetToPosition(file, property.start);
           context.noteCommentOnlyMatch(this.id, file.relPath, line, property.path);
@@ -170,7 +199,8 @@ export const includeContextRule: ScannerRule = {
 
   async scan(context: ScanContext): Promise<Finding[]> {
     const findings: Finding[] = [];
-    const pattern = /\bincludeContext\s*:\s*['"`](thisServer|allServers)['"`]/g;
+    // The key may itself be quoted (JSON): `"includeContext": "thisServer"`.
+    const pattern = /\bincludeContext['"]?\s*:\s*['"`](thisServer|allServers)['"`]/g;
 
     for (const file of filesFor(this, context)) {
       for (const { hit, match } of matches(context, this, file, pattern)) {

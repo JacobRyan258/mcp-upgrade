@@ -1,12 +1,14 @@
 import { DEFAULT_TARGET_VERSION, SOURCES } from '../../constants.js';
 import type { Finding, ScanContext, ScannerRule } from '../../types.js';
-import { collectPropertyPaths, getSourceFile } from '../ast.js';
+import { collectCalls, collectPropertyPaths, getSourceFile } from '../ast.js';
 import { isInComment, offsetToPosition } from '../discovery.js';
 import {
   buildFinding,
   dedupeByLocation,
   filesFor,
+  hasContextNear,
   identifierLiteral,
+  inMcpContext,
   matches,
   quotedLiteral,
 } from './helpers.js';
@@ -46,14 +48,27 @@ const ROOTS_IDENTIFIERS = [
   'RootsCapability',
 ];
 
-const ROOTS_CALLS = [/\b(?:server|mcpServer|client|this)\.listRoots\s*\(/g, /\blistRoots\s*\(/g];
+/**
+ * Callee shapes that fetch roots. Matched against actual call expressions
+ * (never declarations), and only in files with an MCP signal — `listRoots` is
+ * an ordinary identifier in filesystem utilities.
+ */
+const ROOTS_CALL_NAMES = [/(^|\.)listRoots$/];
 
 /**
- * Only a genuine top-level capability declaration counts. A nested key such as
- * `capabilities.tasks.requests.roots` is a different feature and is handled by
- * its own rule.
+ * A `capabilities.roots` path is self-evidencing. A bare top-level `roots` key
+ * is not — Jest configs declare `roots` — so it only counts with
+ * capability/MCP vocabulary nearby, and only as the exact key.
  */
-const ROOTS_CAPABILITY_PATHS = [/^capabilities\.roots(\.|$)/, /^roots(\.|$)/];
+const ROOTS_CAPABILITY_PATH = /(^|\.)capabilities\.roots(\.|$)/;
+const ROOTS_BARE_PATH = /^roots$/;
+const CAPABILITY_CONTEXT_NEEDLES = [
+  'capabilities',
+  'clientcapabilities',
+  'servercapabilities',
+  'mcp',
+  'modelcontextprotocol',
+];
 
 export const rootsDeprecationRule: ScannerRule = {
   id: 'MCP2026-ROOTS-001',
@@ -78,6 +93,10 @@ export const rootsDeprecationRule: ScannerRule = {
     for (const file of filesFor(this, context)) {
       const sourceFile = getSourceFile(file);
 
+      // Roots vocabulary is ordinary vocabulary elsewhere; without an MCP
+      // signal in the repository or file, nothing here is MCP Roots.
+      if (!inMcpContext(context, file)) continue;
+
       for (const { hit } of matches(context, this, file, quotedLiteral(ROOTS_METHOD_LITERALS))) {
         findings.push(
           buildFinding(this, hit, {
@@ -101,24 +120,33 @@ export const rootsDeprecationRule: ScannerRule = {
         );
       }
 
-      for (const pattern of ROOTS_CALLS) {
-        for (const { hit } of matches(context, this, file, pattern)) {
-          findings.push(
-            buildFinding(this, hit, {
+      if (!sourceFile) continue;
+
+      for (const call of collectCalls(sourceFile)) {
+        if (!ROOTS_CALL_NAMES.some((pattern) => pattern.test(call.name))) continue;
+        if (isInComment(file, call.start)) continue;
+        findings.push(
+          buildFinding(
+            this,
+            { file, offset: call.start, endOffset: call.end, text: call.name },
+            {
               title: 'Server relies on deprecated Roots for filesystem context',
               explanation: `${DEPRECATION_STATEMENT} This call asks the client for its roots, which ` +
                 'under Multi Round-Trip Requests is no longer a request the server can issue ' +
                 'directly on a stream.',
               remediation: MIGRATION_GUIDANCE,
               confidence: 'high',
-            }),
-          );
-        }
+            },
+          ),
+        );
       }
 
-      if (!sourceFile) continue;
       for (const property of collectPropertyPaths(sourceFile)) {
-        if (!ROOTS_CAPABILITY_PATHS.some((pattern) => pattern.test(property.path))) continue;
+        const explicit = ROOTS_CAPABILITY_PATH.test(property.path);
+        const bare =
+          ROOTS_BARE_PATH.test(property.path) &&
+          hasContextNear(file, property.start, CAPABILITY_CONTEXT_NEEDLES, 400, property.end);
+        if (!explicit && !bare) continue;
         if (isInComment(file, property.start)) {
           const { line } = offsetToPosition(file, property.start);
           context.noteCommentOnlyMatch(this.id, file.relPath, line, property.path);

@@ -7,6 +7,8 @@ import {
   FAIL_ON_LEVELS,
   KNOWN_TARGETS,
   MAX_FILE_BYTES,
+  MAX_FILES,
+  MAX_TOTAL_BYTES,
   SUPPORTED_EXTENSIONS,
 } from '../../constants.js';
 import { renderChecklistReport } from '../../reporters/checklist.js';
@@ -45,6 +47,14 @@ const FORMATS: OutputFormat[] = ['text', 'json', 'checklist'];
 const CONFIDENCES: Confidence[] = ['low', 'medium', 'high'];
 const FAIL_ON: FailOnLevel[] = ['error', 'warning', 'review'];
 
+export interface ResolveExtras {
+  /**
+   * Base directory for resolving a relative target. Defaults to
+   * `process.cwd()`; embedding applications should pass it explicitly.
+   */
+  cwd?: string;
+}
+
 /**
  * Validates CLI input and resolves it against the filesystem.
  *
@@ -55,6 +65,7 @@ const FAIL_ON: FailOnLevel[] = ['error', 'warning', 'review'];
 export async function resolveOptions(
   targetPath: string,
   raw: RawScanOptions,
+  extras: ResolveExtras = {},
 ): Promise<ResolvedScanOptions> {
   const format = pickOne('format', raw.format ?? 'text', FORMATS);
   const minConfidence = pickOne('min-confidence', raw.minConfidence ?? 'low', CONFIDENCES);
@@ -76,7 +87,7 @@ export async function resolveOptions(
     throw new UsageError('A path to scan is required. Usage: mcp-upgrade scan <path>');
   }
 
-  const absolute = path.resolve(process.cwd(), targetPath);
+  let absolute = path.resolve(extras.cwd ?? process.cwd(), targetPath);
 
   let stat;
   try {
@@ -88,6 +99,16 @@ export async function resolveOptions(
       throw new UsageError(`Path is not readable (permission denied): ${targetPath}`);
     }
     throw new UsageError(`Path could not be read: ${targetPath}`);
+  }
+
+  // Resolve symlinks up front (macOS /tmp is a symlink into /private) so every
+  // downstream relative path is computed against the real location and never
+  // degrades into a `../..`-polluted report path. A user who names a symlink
+  // explicitly is asking for its target.
+  try {
+    absolute = await fs.realpath(absolute);
+  } catch {
+    throw new UsageError(`Path could not be resolved: ${targetPath}`);
   }
 
   let rootDir: string;
@@ -124,9 +145,14 @@ export async function resolveOptions(
     .map((entry) => entry.trim())
     .filter((entry) => entry !== '');
 
+  // The report's `repository.root` is the target as the caller wrote it, so
+  // the same invocation is deterministic regardless of working directory.
+  const displayRoot = targetPath.split(path.sep).join('/').replace(/\/+$/, '') || '/';
+
   return {
     rootDir,
     singleFilePath,
+    displayRoot,
     format,
     target,
     ignore,
@@ -134,11 +160,26 @@ export async function resolveOptions(
     minConfidence,
     ci,
     failOn,
-    // commander sets `color: false` for `--no-color`; also honour NO_COLOR.
-    color: raw.color !== false && !process.env.NO_COLOR && format === 'text',
+    color: colorEnabled(raw, format),
     verbose: raw.verbose === true,
     maxFileBytes: MAX_FILE_BYTES,
+    maxFiles: MAX_FILES,
+    maxTotalBytes: MAX_TOTAL_BYTES,
   };
+}
+
+/**
+ * Colour only reaches a terminal. Precedence: `--no-color` and `NO_COLOR`
+ * always win; `FORCE_COLOR` (non-zero) re-enables colour for a pipe; otherwise
+ * colour requires text format on an interactive stdout, so piped and
+ * redirected output stays ANSI-free.
+ */
+function colorEnabled(raw: RawScanOptions, format: OutputFormat): boolean {
+  if (format !== 'text') return false;
+  if (raw.color === false || process.env.NO_COLOR) return false;
+  const force = process.env.FORCE_COLOR;
+  if (force !== undefined && force !== '' && force !== '0' && force !== 'false') return true;
+  return process.stdout.isTTY === true;
 }
 
 function pickOne<T extends string>(flag: string, value: string, allowed: T[]): T {

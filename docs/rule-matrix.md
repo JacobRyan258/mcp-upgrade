@@ -18,6 +18,17 @@ Classification vocabulary:
 Autofix column records whether a future automated fix could be safe. No autofix is
 implemented in this release.
 
+**MCP-context gating.** Patterns that are ordinary vocabulary outside MCP —
+`tasks/list` as a REST path, a `logging` config key, an EventEmitter handling
+`"initialize"`, `listRoots()` as a filesystem helper, a Next.js `POST` export —
+only produce findings when the repository or the specific file shows an MCP
+signal (an MCP dependency, SDK import, MCP method literal, or JSON-RPC
+vocabulary). Unambiguous MCP-specific literals (`mcp-session-id`,
+`notifications/roots/list_changed`, `logging/setLevel`, `sessionIdGenerator`)
+are always reported. Protocol literals inside multi-line template strings are
+downgraded to REVIEW: such strings are usually documentation or generated
+text, not protocol code.
+
 ---
 
 ## Group 1 — Stateless lifecycle migration
@@ -88,8 +99,11 @@ Supporting quotes:
 > JSON-RPC error code `-32020` (`HeaderMismatch`) if any validation fails."
 > — draft Streamable HTTP
 
-> "Clients using other transports (e.g., stdio) MAY ignore `x-mcp-header`
-> annotations entirely." — SEP-2243 (basis for the stdio exemption)
+The stdio exemption is definitional rather than quoted: SEP-2243 and the draft
+transport page impose the standard-header requirement on *Streamable HTTP POST
+requests* ("The Streamable HTTP transport will require POST requests to include
+the following headers…"), and a stdio server has no HTTP request to carry a
+header. That is why this whole group is gated on the transport classification.
 
 Note: `HeaderMismatch` is `-32020`. The `-32001` printed in the body of SEP-2243 is
 stale — the SEP's own "Changes since SEP became Final" section records the
@@ -109,7 +123,10 @@ Not flagged, deliberately:
 
 - **Client-side acceptance** of `-32002` (a comparison such as `err.code === -32002`
   or a `case -32002:`) is correct forward-compatible behaviour and produces no
-  finding. The change is a producer/consumer asymmetry.
+  finding. The change is a producer/consumer asymmetry. Acceptance *lists*
+  (`[-32002, -32602].includes(code)`) and occurrences flowing through helpers
+  the scanner cannot classify are reported by `MCP2026-ERROR-002` as REVIEW,
+  never asserted as an emission.
 - Any other valid JSON-RPC error code (`-32700`, `-32600`, `-32601`, `-32602`,
   `-32603`, or implementation-defined `-32000`…`-32019`).
 
@@ -136,7 +153,7 @@ Supporting quotes:
 | --- | --- | --- | --- | --- | --- |
 | `MCP2026-TASKS-001` | ERROR | high | Removed task RPCs: `tasks/list`, `tasks/result`, plus `ListTasksRequestSchema` / `GetTaskPayloadRequestSchema` | [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) · [changelog](https://modelcontextprotocol.io/specification/draft/changelog) | manual |
 | `MCP2026-TASKS-002` | ERROR | high | Legacy Tasks capability negotiation: `capabilities.tasks`, `tasks.requests.*`, `tasks.list`, `tasks.cancel`, `experimental.tasks`, and the tool-level `execution.taskSupport` field | [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) | manual |
-| `MCP2026-TASKS-003` | REVIEW | medium | Legacy task augmentation and lifecycle structures: the per-request `task` param, `io.modelcontextprotocol/related-task`, `modelcontextprotocol.io/task`, `notifications/tasks/status`, `pollInterval`, `TaskStore` / `InMemoryTaskStore` / `registerToolTask` / `taskMessageQueue` | [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) · [SEP-1686](https://modelcontextprotocol.io/seps/1686-tasks) | manual |
+| `MCP2026-TASKS-003` | REVIEW | medium | Legacy task augmentation and lifecycle structures: the per-request `task` param, `io.modelcontextprotocol/related-task`, `modelcontextprotocol.io/task`, `notifications/tasks/status`, the renamed `pollInterval`/`ttl` fields, `TaskStore` / `InMemoryTaskStore` / `registerToolTask` / `TaskRequestHandlerExtra`. `statusMessage` and `lastUpdatedAt` are deliberately **not** flagged — SEP-2663 carries both forward unchanged. | [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) · [SEP-1686](https://modelcontextprotocol.io/seps/1686-tasks) | manual |
 | `MCP2026-TASKS-004` | ERROR | high | Task-augmented Sampling and Elicitation: `tasks.requests.sampling.createMessage`, `tasks.requests.elicitation.create`, `createMessageStream`, `elicitInputStream` | [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) · [SEP-2260](https://modelcontextprotocol.io/seps/2260-Require-Server-requests-to-be-associated-with-Client-requests) | manual |
 
 **Guidance these rules emit.** Tasks move from an experimental core feature to an
@@ -233,7 +250,8 @@ Supporting quotes:
 **Guidance these rules emit.** Log to `stderr` on stdio, or use OpenTelemetry and
 normal application observability for structured logging — the draft also documents
 W3C trace context propagation through `_meta` (`traceparent`, `tracestate`,
-`baggage`, SEP-414). Protocol logging is never replaced automatically, because log
+`baggage`, per the OpenTelemetry semantic conventions the draft base protocol
+page cites). Protocol logging is never replaced automatically, because log
 call sites carry request context that a rewrite would drop. The guidance warns that
 moving log output to `stderr` or an observability backend changes who can read it,
 so any argument, header or tool input currently interpolated into a log line should
@@ -264,8 +282,8 @@ Verdict rules:
 
 | Verdict | Condition |
 | --- | --- |
-| `LIKELY_READY` | An explicit MCP Apps signal is present: the `io.modelcontextprotocol/ui` identifier, a `ui://` URI, the `text/html;profile=mcp-app` MIME type, or an `@modelcontextprotocol/ext-apps` import. |
-| `POSSIBLE_CANDIDATE` | Generic UI-producing signals only — HTML in tool results, HTML templates, JSX/TSX modules, iframes, embedded assets. |
+| `LIKELY_READY` | An explicit MCP Apps signal is present: the `io.modelcontextprotocol/ui` identifier, a `ui://` URI, the `text/html;profile=mcp-app` MIME type, `_meta.ui` metadata, or an `@modelcontextprotocol/ext-apps` import. A bare `resourceUri:` property is *not* explicit. |
+| `POSSIBLE_CANDIDATE` | Generic UI-producing signals only — HTML in tool results, HTML templates, JSX/TSX modules, iframes, embedded assets, bare `resourceUri:` properties — or a foreign UI convention such as `text/html+skybridge`, which is reported as needing translation rather than as an MCP App. |
 | `NO_SIGNAL` | The repository looks like an MCP server but shows no UI signal. |
 | `NOT_APPLICABLE` | The repository does not look like an MCP server. |
 
@@ -305,5 +323,5 @@ under Limitations.
 | Error-code renumbering `-32001`→`-32020`, `-32003`→`-32021`, `-32004`→`-32022` | draft changelog, minor change 12 |
 | Authorization hardening (`iss` validation, `application_type`, credential binding, DCR deprecation) | SEP-2468, SEP-837, SEP-2352, PR #2858 |
 | JSON Schema 2020-12 loosening for `inputSchema` / `outputSchema` | [SEP-2106](https://modelcontextprotocol.io/seps/2106-json-schema-2020-12) |
-| TypeScript SDK v1 → v2 package split (`@modelcontextprotocol/sdk` → `/client`, `/server`, `/core`) | [Beta SDK announcement](https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/) |
+| TypeScript SDK v1 → v2 package split (`@modelcontextprotocol/sdk` → `/server`, `/client` and adapter packages, per the announcement; `/core` additionally published on npm) | [Beta SDK announcement](https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/) |
 | Non-JavaScript MCP servers (Python, Go, C#, Java, Rust, PHP) | — |

@@ -98,7 +98,10 @@ export interface DetectedDependency {
 }
 
 export interface RepositoryClassification {
-  /** Absolute-free display path of the scan root. */
+  /**
+   * The scan target as the caller provided it (POSIX separators). Absolute
+   * only when the caller passed an absolute path.
+   */
   root: string;
   /** True when the target was a single file rather than a directory. */
   singleFile: boolean;
@@ -147,6 +150,15 @@ export interface PreparedFile {
   isTestPath: boolean;
 }
 
+/**
+ * Why a discovered file was not scanned.
+ *
+ * `ignored` and `unsupported-extension` are reserved: directory discovery only
+ * globs supported extensions and applies ignore patterns during the walk, so
+ * files excluded that way never become candidates and are not counted in
+ * `filesDiscovered`. `scan-limit` marks files skipped because the scan hit
+ * the maximum file count or total byte budget.
+ */
 export type SkipReason =
   | 'ignored'
   | 'unsupported-extension'
@@ -154,7 +166,8 @@ export type SkipReason =
   | 'binary'
   | 'unreadable'
   | 'test-path'
-  | 'symlink-outside-root';
+  | 'symlink-outside-root'
+  | 'scan-limit';
 
 export interface FileScanResult {
   file: string;
@@ -228,6 +241,13 @@ export interface ResolvedScanOptions {
   rootDir: string;
   /** Absolute path of a single target file, when scanning one file. */
   singleFilePath: string | null;
+  /**
+   * The scan target exactly as the caller provided it (POSIX separators,
+   * trailing slashes trimmed). Used as `repository.root` in reports so the
+   * same invocation always produces the same output, independent of the
+   * process working directory.
+   */
+  displayRoot: string;
   format: OutputFormat;
   target: string;
   ignore: string[];
@@ -239,6 +259,10 @@ export interface ResolvedScanOptions {
   verbose: boolean;
   /** Maximum file size in bytes that will be read. */
   maxFileBytes: number;
+  /** Maximum number of files that will be scanned; the rest are reported skipped. */
+  maxFiles: number;
+  /** Maximum total content bytes read across the scan. */
+  maxTotalBytes: number;
 }
 
 /* -------------------------------------------------------------------------- */

@@ -41,6 +41,8 @@ function scriptKindFor(ext: string): ts.ScriptKind {
     case '.mjs':
     case '.cjs':
       return ts.ScriptKind.JS;
+    case '.json':
+      return ts.ScriptKind.JSON;
     default:
       return ts.ScriptKind.TS;
   }
@@ -63,10 +65,23 @@ function parse(content: string, ext: string): ts.SourceFile {
   return sourceFile;
 }
 
-/** Returns the parsed source file for TS/JS inputs, or null for JSON/YAML. */
+/**
+ * Returns the parsed source file for TS/JS/JSON inputs, or null for YAML.
+ * JSON parses in the compiler's JSON mode, so rules that walk object-property
+ * paths (capability declarations) see the same shapes in `.json` config files
+ * as in source code.
+ */
 export function getSourceFile(file: PreparedFile): ts.SourceFile | null {
   if (parseCache.has(file)) return parseCache.get(file) ?? null;
-  const result = file.kind === 'ts' || file.kind === 'js' ? parse(file.content, file.ext) : null;
+  let result: ts.SourceFile | null = null;
+  if (file.kind === 'ts' || file.kind === 'js' || file.kind === 'json') {
+    try {
+      result = parse(file.content, file.ext);
+    } catch {
+      // A file the parser cannot survive falls back to the lexical passes.
+      result = null;
+    }
+  }
   parseCache.set(file, result);
   return result;
 }
@@ -116,16 +131,23 @@ function commentRangesFromParse(content: string, ext: string): Range[] {
     }
   };
 
-  const visit = (node: ts.Node): void => {
-    if (node.getFullStart() !== node.getStart(sourceFile, true)) {
-      collect(ts.getLeadingCommentRanges(content, node.getFullStart()));
-    }
-    ts.forEachChild(node, visit);
-  };
-
-  visit(sourceFile);
-  // The final trailing comment of a file hangs off the EOF token.
-  collect(ts.getLeadingCommentRanges(content, sourceFile.endOfFileToken.getFullStart()));
+  try {
+    walk(sourceFile, (node) => {
+      if (node.getFullStart() !== node.getStart(sourceFile, true)) {
+        collect(ts.getLeadingCommentRanges(content, node.getFullStart()));
+      }
+      // Same-line trailing comments (`code(); // note`) are trailing trivia and
+      // never appear in any node's leading ranges; missing them would let rules
+      // fire inside comments.
+      collect(ts.getTrailingCommentRanges(content, node.getEnd()));
+    });
+    // The final trailing comment of a file hangs off the EOF token.
+    collect(ts.getLeadingCommentRanges(content, sourceFile.endOfFileToken.getFullStart()));
+  } catch {
+    // A pathological file must degrade (no comment suppression), never crash
+    // the scan.
+    return [];
+  }
 
   ranges.sort((a, b) => a.start - b.start);
   return ranges;
@@ -222,21 +244,71 @@ function skipQuoted(content: string, start: number, quote: string): number {
 /* Node queries                                                                */
 /* -------------------------------------------------------------------------- */
 
-/** Depth-first walk over every node. */
+/**
+ * Depth-first pre-order walk over every node.
+ *
+ * Iterative on purpose: scanned code is hostile input, and a minified file can
+ * contain expression chains hundreds of thousands of nodes deep — a recursive
+ * walk overflows the call stack on exactly the files a scanner most needs to
+ * survive. `ts.forEachChild` only descends one level per call, so stack depth
+ * stays constant regardless of AST depth.
+ */
 export function walk(node: ts.Node, visitor: (node: ts.Node) => void): void {
-  visitor(node);
-  ts.forEachChild(node, (child) => walk(child, visitor));
+  const stack: ts.Node[] = [node];
+  const children: ts.Node[] = [];
+  while (stack.length > 0) {
+    const current = stack.pop() as ts.Node;
+    visitor(current);
+    children.length = 0;
+    ts.forEachChild(current, (child) => {
+      children.push(child);
+    });
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i] as ts.Node);
+  }
+}
+
+/**
+ * True when `offset` sits inside a template literal that spans more than one
+ * line. Multi-line template strings are overwhelmingly documentation, SQL,
+ * prose or generated text rather than protocol code, so rules that match
+ * quoted protocol literals downgrade rather than assert an ERROR there.
+ */
+export function isInsideMultilineTemplate(
+  sourceFile: ts.SourceFile,
+  content: string,
+  offset: number,
+): boolean {
+  // Iterative descent along the containment path; recursion would overflow on
+  // pathologically deep ASTs.
+  let current: ts.Node | undefined = sourceFile;
+  while (current) {
+    if (ts.isTemplateLiteral(current)) {
+      const text = content.slice(current.getStart(sourceFile, false), current.getEnd());
+      if (text.includes('\n')) return true;
+    }
+    let next: ts.Node | undefined;
+    ts.forEachChild(current, (child) => {
+      if (next) return;
+      if (offset >= child.getStart(sourceFile, true) && offset < child.getEnd()) next = child;
+    });
+    current = next;
+  }
+  return false;
 }
 
 /** Finds the innermost node containing `offset`. */
 export function nodeAt(sourceFile: ts.SourceFile, offset: number): ts.Node | undefined {
   let found: ts.Node | undefined;
-  const visit = (node: ts.Node): void => {
-    if (offset < node.getStart(sourceFile, true) || offset >= node.getEnd()) return;
-    found = node;
-    ts.forEachChild(node, visit);
-  };
-  ts.forEachChild(sourceFile, visit);
+  let current: ts.Node | undefined = sourceFile;
+  while (current) {
+    let next: ts.Node | undefined;
+    ts.forEachChild(current, (child) => {
+      if (next) return;
+      if (offset >= child.getStart(sourceFile, true) && offset < child.getEnd()) next = child;
+    });
+    if (next) found = next;
+    current = next;
+  }
   return found;
 }
 
@@ -245,20 +317,23 @@ export function calleeName(node: ts.CallExpression | ts.NewExpression): string {
   return expressionText(node.expression);
 }
 
-function expressionText(node: ts.Expression): string {
+function expressionText(node: ts.Expression, depth = 0): string {
+  // Bounded: hostile minified code can nest access chains deep enough to
+  // overflow a recursive renderer, and nothing meaningful lives past this.
+  if (depth > 64) return '';
   if (ts.isIdentifier(node)) return node.text;
   if (ts.isPropertyAccessExpression(node)) {
-    return `${expressionText(node.expression)}.${node.name.text}`;
+    return `${expressionText(node.expression, depth + 1)}.${node.name.text}`;
   }
   if (ts.isElementAccessExpression(node)) {
     const arg = node.argumentExpression;
     const key = ts.isStringLiteralLike(arg) ? arg.text : '?';
-    return `${expressionText(node.expression)}[${key}]`;
+    return `${expressionText(node.expression, depth + 1)}[${key}]`;
   }
   if (node.kind === ts.SyntaxKind.ThisKeyword) return 'this';
-  if (ts.isCallExpression(node)) return `${expressionText(node.expression)}()`;
-  if (ts.isParenthesizedExpression(node)) return expressionText(node.expression);
-  if (ts.isNonNullExpression(node)) return expressionText(node.expression);
+  if (ts.isCallExpression(node)) return `${expressionText(node.expression, depth + 1)}()`;
+  if (ts.isParenthesizedExpression(node)) return expressionText(node.expression, depth + 1);
+  if (ts.isNonNullExpression(node)) return expressionText(node.expression, depth + 1);
   return '';
 }
 
@@ -325,10 +400,10 @@ export function collectPropertyPaths(sourceFile: ts.SourceFile): PropertyPathHit
 /* Error-code usage                                                            */
 /* -------------------------------------------------------------------------- */
 
-export type CodeUsage = 'emit' | 'compare' | 'declare' | 'unknown';
+export type CodeUsage = 'emit' | 'compare' | 'declare' | 'list' | 'unknown';
 
 const EMIT_CALL_PATTERN =
-  /(^|\.)(McpError|ProtocolError|JsonRpcError|RpcError|sendError|createError|makeError|jsonRpcError|errorResponse|reject|fail|throwError)$/i;
+  /(^|\.)(McpError|ProtocolError|JsonRpcError|RpcError|sendError|createError|makeError|jsonRpcError|errorResponse|reject|fail|throwError|json|send|reply|respond)$/i;
 
 const COMPARE_OPERATORS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.EqualsEqualsToken,
@@ -358,6 +433,10 @@ export function classifyCodeUsage(node: ts.Node): CodeUsage {
     }
     if (ts.isCaseClause(parent)) return 'compare';
     if (ts.isSwitchStatement(parent) && parent.expression === current) return 'compare';
+    // A literal inside an array is list membership — most often an acceptance
+    // list such as `const NOT_FOUND = [-32002, -32602]`, which is correct
+    // client behaviour and must never be asserted as an emission.
+    if (ts.isArrayLiteralExpression(parent)) return 'list';
     if (ts.isCallExpression(parent)) {
       const name = calleeName(parent);
       if (/(^|\.)(includes|has|indexOf|some|contains)$/.test(name)) return 'compare';

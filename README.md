@@ -160,6 +160,37 @@ tool can never be mistaken for a broken server.
 
 Without `--ci`, a completed scan always exits `0` — reporting is not failing.
 
+## Programmatic API
+
+The scanner can be embedded without going through the CLI. The package is
+ESM-native (`require()` works on Node versions that support `require(esm)`,
+i.e. 20.19+ and 22.12+); types are included.
+
+```ts
+import { scanPath } from 'mcp-upgrade';
+
+const report = await scanPath({
+  path: './server',
+  target: '2026-07-28',
+  includeTests: false,
+  minimumConfidence: 'low',
+});
+
+console.log(report.summary.counts, report.summary.readiness.score);
+```
+
+`scanPath()` returns the same `ScanReport` object the JSON format prints —
+a stable, versioned contract (see `schemaVersion`). Library calls never write
+to stdout, never call `process.exit`, and hold no global mutable state, so
+concurrent scans in one process are safe. Invalid input throws `UsageError`;
+unexpected failures throw `InternalScannerError` (both exported).
+
+Also exported: `scan()` (report plus verbose trace), `runScan()`/`resolveOptions()`
+(the lower-level pieces), the reporters (`renderTextReport`, `renderJsonReport`,
+`renderChecklistReport`), `ALL_RULES`, and all report types. In server
+environments, pass `cwd` explicitly so nothing depends on the process working
+directory.
+
 ### Default ignored paths
 
 ```text
@@ -244,9 +275,27 @@ dependencies, or follow values across files.
 conclusive. When a wrapper, middleware or abstraction could legitimately explain
 the pattern, the finding is downgraded to REVIEW rather than dropped. Matches
 that appear only inside comments are never reported — they are counted and,
-under `--verbose`, listed as ignored evidence.
+under `--verbose`, listed as ignored evidence (redacted like any excerpt).
+Patterns that are ordinary vocabulary outside MCP (a Jest `roots` config, a
+`logging` config object, an EventEmitter handling `"initialize"`, task-queue
+code, a Next.js `POST` route) only fire when the repository or file shows an
+MCP signal — an MCP dependency, an SDK import, MCP method literals, or similar.
 
-**Known detection gaps.** These `2026-07-28` changes are *not* detected:
+> A clean report means that no implemented rule fired. It does not guarantee
+> complete compatibility with the target MCP specification.
+
+**Scan budgets.** Individual files over 1 MiB, and anything beyond 20,000 files
+or 128 MiB of total content, are skipped and reported (`too-large` /
+`scan-limit`) — never silently dropped. Symbolic links inside a scanned
+directory are never followed. Files inside directories the scanner cannot read
+are not discoverable and therefore cannot be reported as skipped. Scanning this
+repository itself reports findings in the rule definitions — the scanner's own
+source contains the literals it searches for.
+
+**Known detection limits.** Capability keys built with computed property names
+(`{ [cap]: {} }`) are not detected. Secrets split across string concatenations
+may evade redaction — review a report before pasting it anywhere public, as
+with any tool. These `2026-07-28` changes are *not* detected:
 
 - Multi Round-Trip Requests: server-initiated requests replaced by
   `InputRequiredResult` / `inputRequests` / `inputResponses` ([SEP-2322](https://modelcontextprotocol.io/seps/2322-MRTR))
@@ -294,6 +343,9 @@ review one before you do, as with any tool.
 ## Roadmap
 
 - Revalidate every rule against the **final** `2026-07-28` specification once published
+- A hosted validator at [upgrade.jacobryanlive.com](https://upgrade.jacobryanlive.com)
+  for non-technical users (planned; not yet live). The scanning engine in this
+  package is the same one the hosted validator will run.
 - Coverage for the gaps listed above, starting with MRTR and `CacheableResult`
 - SARIF output for code-scanning integrations
 - Autofix for the rules already marked `safe` or `suggested`

@@ -52,7 +52,7 @@ const RULES: RedactionRule[] = [
     // Known vendor token prefixes, which are unambiguous wherever they appear.
     kind: 'vendor-token',
     pattern:
-      /\b(?:sk-[A-Za-z0-9_-]{16,}|xox[abposr]-[A-Za-z0-9-]{8,}|gh[pousr]_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{12,}|AIza[0-9A-Za-z_-]{20,}|ya29\.[0-9A-Za-z_-]{10,})/g,
+      /\b(?:sk-[A-Za-z0-9_-]{16,}|xox[abposr]-[A-Za-z0-9-]{8,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{22,}|glpat-[A-Za-z0-9_-]{16,}|npm_[A-Za-z0-9]{28,}|(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{10,}|whsec_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{12,}|AIza[0-9A-Za-z_-]{20,}|ya29\.[0-9A-Za-z_-]{10,})/g,
     replace: () => placeholder('token'),
   },
   {
@@ -61,8 +61,11 @@ const RULES: RedactionRule[] = [
     replace: () => placeholder('jwt'),
   },
   {
+    // Bounded quantifiers throughout: the unbounded form is quadratic on long
+    // credential-free runs of the scheme character class, and redact() runs on
+    // hostile input.
     kind: 'connection-string',
-    pattern: /\b([a-z][a-z0-9+.-]*:\/\/)[^\s:@/"'`]+:[^\s@/"'`]+@/gi,
+    pattern: /\b([a-z][a-z0-9+.-]{1,63}:\/\/)[^\s:@/"'`]{1,256}:[^\s@/"'`]{1,256}@/gi,
     replace: (_m, scheme) => `${scheme}${placeholder('credentials')}@`,
   },
   {
@@ -75,12 +78,35 @@ const RULES: RedactionRule[] = [
     replace: (_m, prefix) => `${prefix}${placeholder('secret')}`,
   },
   {
-    // Long high-entropy runs. Requires mixed case *and* digits so hashes,
-    // base64 payloads and random keys match while identifiers, URLs and
-    // sentences do not.
+    // The same credential-shaped keys with an *unquoted* value — `.env` lines
+    // inside YAML/JSON, shell exports (`PGPASSWORD=hunter2`), YAML scalars
+    // (`password: hunter2`). Values that look like code rather than literals
+    // (calls, template interpolation, env lookups, type names) are left alone.
+    kind: 'credential-assignment-unquoted',
+    pattern:
+      /((?:api[_-]?key|apikey|secret|client[_-]?secret|password|passwd|pwd|access[_-]?token|refresh[_-]?token|auth[_-]?token|private[_-]?key|credential)["'`\]]*\s*[:=]\s*)(?!["'`])([^\s"'`,;)}\]]{6,})/gi,
+    replace: (m, prefix: string, value: string) => {
+      if (/[(${]/.test(value)) return m;
+      if (/^process\.env/.test(value)) return m;
+      if (
+        /^(?:string|String|number|boolean|true|false|null|undefined|unknown|any|never|object|symbol|bigint|Buffer|Record)\b/.test(
+          value,
+        )
+      ) {
+        return m;
+      }
+      return `${prefix}${placeholder('secret')}`;
+    },
+  },
+  {
+    // Long high-entropy runs. The mixed-class requirement (lower + upper +
+    // digit) is verified in code rather than with lookaheads: the lookahead
+    // form re-scans the run at every candidate position and is quadratic on
+    // adversarial input.
     kind: 'high-entropy',
-    pattern: /\b(?=[A-Za-z0-9+/_-]*[a-z])(?=[A-Za-z0-9+/_-]*[A-Z])(?=[A-Za-z0-9+/_-]*\d)[A-Za-z0-9+/_-]{32,}={0,2}\b/g,
-    replace: () => placeholder('high-entropy'),
+    pattern: /[A-Za-z0-9+/_-]{32,}={0,2}/g,
+    replace: (m) =>
+      /[a-z]/.test(m) && /[A-Z]/.test(m) && /\d/.test(m) ? placeholder('high-entropy') : m,
   },
 ];
 

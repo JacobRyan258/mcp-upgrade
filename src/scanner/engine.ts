@@ -19,6 +19,7 @@ import { InternalScannerError } from '../types.js';
 import { classify } from './classification.js';
 import { discover } from './discovery.js';
 import { estimateEffort } from './effort.js';
+import { toEvidence } from './redaction.js';
 import { ALL_RULES, deriveAppsReadiness } from './rules/index.js';
 import { fileApplies, transportApplies } from './rules/helpers.js';
 import { computeReadiness } from './scoring.js';
@@ -88,8 +89,10 @@ export async function runScan(
     trace: (message) => {
       if (options.verbose) trace.push(message);
     },
+    // Redacted like any other excerpt: this text reaches --verbose output, and
+    // a commented-out line can carry a credential just as live code can.
     noteCommentOnlyMatch: (ruleId, file, line, text) => {
-      commentOnlyMatches.push({ ruleId, file, line, text: text.slice(0, 80) });
+      commentOnlyMatches.push({ ruleId, file, line, text: toEvidence(text, 80) });
     },
   };
 

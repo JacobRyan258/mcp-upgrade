@@ -1,0 +1,40 @@
+name: Bug report
+description: The CLI crashed, misbehaved, or produced wrong output
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Scanner version
+      description: Output of `mcp-upgrade --version`
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: "Node 22.12.0, macOS 15 / Ubuntu 24.04 / Windows 11"
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: >
+        Include the output and the exit code (`echo $?`). Review pasted output
+        for anything sensitive first, as with any log.
+    validations:
+      required: true

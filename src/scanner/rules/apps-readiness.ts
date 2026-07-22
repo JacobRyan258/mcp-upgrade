@@ -56,13 +56,25 @@ const APP_SIGNALS: AppSignal[] = [
       'and RESOURCE_MIME_TYPE.',
   },
   {
-    pattern: /_meta\s*(?:\.|\[\s*['"`])ui\b|['"`]ui\/resourceUri['"`]|\bresourceUri\s*:/g,
+    // Only the _meta-anchored forms are explicit MCP Apps metadata.
+    pattern: /_meta\s*(?:\.|\[\s*['"`])ui\b|['"`]ui\/resourceUri['"`]/g,
     strength: 'explicit',
     title: 'MCP Apps tool metadata',
     note:
       'A tool links to its UI resource through _meta.ui.resourceUri. Note that the flat ' +
       '_meta["ui/resourceUri"] form is deprecated in favour of the nested one and is documented as ' +
       'being removed before GA.',
+  },
+  {
+    // A bare `resourceUri:` property is common in generic REST clients and is
+    // never, on its own, evidence of MCP Apps — so it can suggest candidacy
+    // but must not flip the verdict to LIKELY_READY.
+    pattern: /\bresourceUri\s*:/g,
+    strength: 'generic',
+    title: 'resourceUri property',
+    note:
+      'A property named resourceUri appears here. MCP Apps links tools to UI resources through ' +
+      '_meta.ui.resourceUri; a bare resourceUri property may or may not be related.',
   },
   {
     pattern: /['"`]text\/html\+skybridge['"`]/g,

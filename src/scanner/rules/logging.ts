@@ -1,12 +1,14 @@
 import { DEFAULT_TARGET_VERSION, META_KEYS, SOURCES } from '../../constants.js';
 import type { Finding, ScanContext, ScannerRule } from '../../types.js';
-import { collectPropertyPaths, getSourceFile } from '../ast.js';
+import { collectCalls, collectPropertyPaths, getSourceFile } from '../ast.js';
 import { isInComment, offsetToPosition } from '../discovery.js';
 import {
   buildFinding,
   dedupeByLocation,
   filesFor,
+  hasContextNear,
   identifierLiteral,
+  inMcpContext,
   matches,
   quotedLiteral,
 } from './helpers.js';
@@ -47,17 +49,26 @@ const LOGGING_IDENTIFIERS = [
   'SetLevelRequest',
 ];
 
-const LOGGING_CALLS = [
-  /\b(?:server|mcpServer|this)\.sendLoggingMessage\s*\(/g,
-  /\bsendLoggingMessage\s*\(/g,
-];
+/**
+ * Callee shapes that emit protocol log notifications. Matched against actual
+ * call expressions (never declarations), and only in files with an MCP signal.
+ */
+const LOGGING_CALL_NAMES = [/(^|\.)sendLoggingMessage$/];
 
 /**
- * Only a genuine top-level capability declaration counts. A nested key such as
- * `capabilities.tasks.requests.logging` is a different feature and is handled by
- * its own rule.
+ * A `capabilities.logging` path is self-evidencing. A bare top-level `logging`
+ * key is not — every second app config has one — so it only counts with
+ * capability/MCP vocabulary nearby, and only as the exact key.
  */
-const LOGGING_CAPABILITY_PATHS = [/^capabilities\.logging(\.|$)/, /^logging(\.|$)/];
+const LOGGING_CAPABILITY_PATH = /(^|\.)capabilities\.logging(\.|$)/;
+const LOGGING_BARE_PATH = /^logging$/;
+const CAPABILITY_CONTEXT_NEEDLES = [
+  'capabilities',
+  'clientcapabilities',
+  'servercapabilities',
+  'mcp',
+  'modelcontextprotocol',
+];
 
 export const loggingDeprecationRule: ScannerRule = {
   id: 'MCP2026-LOGGING-001',
@@ -80,6 +91,10 @@ export const loggingDeprecationRule: ScannerRule = {
 
     for (const file of filesFor(this, context)) {
       const sourceFile = getSourceFile(file);
+
+      // 'notifications/message' is also an unremarkable pub/sub topic name;
+      // without an MCP signal it is not the MCP log notification.
+      if (!inMcpContext(context, file)) continue;
 
       for (const { hit } of matches(
         context,
@@ -111,10 +126,16 @@ export const loggingDeprecationRule: ScannerRule = {
         );
       }
 
-      for (const pattern of LOGGING_CALLS) {
-        for (const { hit } of matches(context, this, file, pattern)) {
-          findings.push(
-            buildFinding(this, hit, {
+      if (!sourceFile) continue;
+
+      for (const call of collectCalls(sourceFile)) {
+        if (!LOGGING_CALL_NAMES.some((pattern) => pattern.test(call.name))) continue;
+        if (isInComment(file, call.start)) continue;
+        findings.push(
+          buildFinding(
+            this,
+            { file, offset: call.start, endOffset: call.end, text: call.name },
+            {
               title: 'Log emitted through deprecated protocol logging',
               explanation:
                 `${DEPRECATION_STATEMENT} Note also that log level is now per request via ` +
@@ -123,14 +144,17 @@ export const loggingDeprecationRule: ScannerRule = {
                 'nothing on the wire.',
               remediation: MIGRATION_GUIDANCE,
               confidence: 'high',
-            }),
-          );
-        }
+            },
+          ),
+        );
       }
 
-      if (!sourceFile) continue;
       for (const property of collectPropertyPaths(sourceFile)) {
-        if (!LOGGING_CAPABILITY_PATHS.some((pattern) => pattern.test(property.path))) continue;
+        const explicit = LOGGING_CAPABILITY_PATH.test(property.path);
+        const bare =
+          LOGGING_BARE_PATH.test(property.path) &&
+          hasContextNear(file, property.start, CAPABILITY_CONTEXT_NEEDLES, 400, property.end);
+        if (!explicit && !bare) continue;
         if (isInComment(file, property.start)) {
           const { line } = offsetToPosition(file, property.start);
           context.noteCommentOnlyMatch(this.id, file.relPath, line, property.path);

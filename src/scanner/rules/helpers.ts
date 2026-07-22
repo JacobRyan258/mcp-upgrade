@@ -95,7 +95,7 @@ export interface FindingInput {
 export function buildFinding(rule: ScannerRule, hit: Hit, input: FindingInput): Finding {
   const { line, column } = offsetToPosition(hit.file, hit.offset);
   const endLine = hit.endOffset ? offsetToPosition(hit.file, hit.endOffset).line : line;
-  const rawEvidence = input.evidence ?? lineText(hit.file, line) ?? hit.text;
+  const rawEvidence = input.evidence ?? evidenceLine(hit, line, column);
 
   const finding: Finding = {
     ruleId: rule.id,
@@ -116,6 +116,19 @@ export function buildFinding(rule: ScannerRule, hit: Hit, input: FindingInput): 
   if (endLine !== line) finding.endLine = endLine;
   if (input.transportApplicability) finding.transportApplicability = input.transportApplicability;
   return finding;
+}
+
+/**
+ * The source line as evidence — windowed around the match when the line is
+ * longer than an excerpt can show, so the matched token is always visible
+ * (minified files are single multi-kilobyte lines; the head of one says
+ * nothing).
+ */
+function evidenceLine(hit: Hit, line: number, column: number): string {
+  const text = lineText(hit.file, line) || hit.text;
+  if (text.length <= 200) return text;
+  const start = Math.max(0, column - 1 - 80);
+  return `${start > 0 ? '…' : ''}${text.slice(start, start + 240)}`;
 }
 
 /**
@@ -180,15 +193,53 @@ export function identifierLiteral(literals: readonly string[]): RegExp {
   return new RegExp(`\\b(${literalAlternation(literals)})\\b`, 'g');
 }
 
-/** True when any of the given substrings appear within `radius` chars of `offset`. */
+/**
+ * True when any of the given needles appear within `radius` chars of the match.
+ *
+ * Two hardenings both exist because their absence produced confirmed false
+ * positives: the matched span itself is excluded from the window (otherwise a
+ * needle that is a substring of the match makes the gate self-satisfying), and
+ * purely alphabetic needles are matched on word boundaries (otherwise `uri`
+ * matches "during" and "security").
+ */
 export function hasContextNear(
   file: PreparedFile,
   offset: number,
-  needles: readonly string[],
+  needles: readonly (string | RegExp)[],
   radius = 400,
+  matchEnd: number = offset,
 ): boolean {
-  const start = Math.max(0, offset - radius);
-  const end = Math.min(file.content.length, offset + radius);
-  const window = file.content.slice(start, end).toLowerCase();
-  return needles.some((needle) => window.includes(needle.toLowerCase()));
+  const before = file.content.slice(Math.max(0, offset - radius), offset).toLowerCase();
+  const after = file.content
+    .slice(matchEnd, Math.min(file.content.length, matchEnd + radius))
+    .toLowerCase();
+  return needles.some((needle) => {
+    if (needle instanceof RegExp) return needle.test(before) || needle.test(after);
+    const lower = needle.toLowerCase();
+    if (/^[a-z]+$/.test(lower)) {
+      const bounded = new RegExp(`\\b${lower}\\b`);
+      return bounded.test(before) || bounded.test(after);
+    }
+    return before.includes(lower) || after.includes(lower);
+  });
+}
+
+/**
+ * Signals that a file is MCP-related at all. Used to gate patterns that are
+ * individually too generic to assert on arbitrary code — an EventEmitter
+ * handling "initialize", a REST route called "tasks/list", a config object
+ * with a top-level `logging` key. Coarse on purpose: it only decides whether
+ * MCP rules have any business looking at this file, never whether a specific
+ * line is a finding.
+ */
+const MCP_FILE_SIGNAL =
+  /@modelcontextprotocol|modelcontextprotocol\.io|\bMcpServer\b|\bFastMCP\b|\bmcp\b|json-?rpc/i;
+
+export function fileHasMcpSignal(file: PreparedFile): boolean {
+  return MCP_FILE_SIGNAL.test(file.content);
+}
+
+/** The repository shows MCP evidence, or this specific file does. */
+export function inMcpContext(context: ScanContext, file: PreparedFile): boolean {
+  return context.repository.isLikelyMcpServer || fileHasMcpSignal(file);
 }

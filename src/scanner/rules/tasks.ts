@@ -8,6 +8,7 @@ import {
   filesFor,
   hasContextNear,
   identifierLiteral,
+  inMcpContext,
   matches,
   quotedLiteral,
 } from './helpers.js';
@@ -89,6 +90,10 @@ export const removedTaskMethodsRule: ScannerRule = {
     const findings: Finding[] = [];
 
     for (const file of filesFor(this, context)) {
+      // 'tasks/list' is also a perfectly ordinary REST path segment; without
+      // any MCP signal in the repository or file it is not an MCP task RPC.
+      if (!inMcpContext(context, file)) continue;
+
       for (const removed of REMOVED_TASK_METHODS) {
         for (const { hit } of matches(context, this, file, quotedLiteral([removed.method]))) {
           findings.push(
@@ -119,10 +124,15 @@ export const removedTaskMethodsRule: ScannerRule = {
 /* MCP2026-TASKS-002 — legacy capability negotiation                           */
 /* -------------------------------------------------------------------------- */
 
-/** Object-literal paths that declare the 2025-11-25 tasks capability. */
+/**
+ * Object-literal paths that declare the 2025-11-25 tasks capability.
+ * `tasks.requests.sampling` and `tasks.requests.elicitation` are excluded:
+ * task-augmented client requests are MCP2026-TASKS-004's finding, and
+ * double-reporting the same line under two rules would double-count it.
+ */
 const LEGACY_CAPABILITY_PATHS = [
   /(^|\.)capabilities\.tasks(\.|$)/,
-  /(^|\.)tasks\.requests(\.|$)/,
+  /(^|\.)tasks\.requests(?!\.(?:sampling|elicitation))(\.|$)/,
   /(^|\.)tasks\.(?:list|cancel)$/,
   /(^|\.)experimental\.tasks(\.|$)/,
 ];
@@ -162,8 +172,9 @@ export const legacyTaskCapabilityRule: ScannerRule = {
       'inside _meta["io.modelcontextprotocol/clientCapabilities"].extensions. Remove ' +
       'capabilities.tasks, tasks.requests.*, tasks.list, tasks.cancel and execution.taskSupport. ' +
       'Then decide server-side, per call, whether to return a CreateTaskResult — and never return ' +
-      'one to a client that did not declare the extension on that request, which must instead get ' +
-      `-32021 (Missing Required Client Capability). ${SEMANTIC_REVIEW_NOTE}`;
+      'one to a client that did not declare the extension on that request. If such a request ' +
+      'cannot be serviced without creating a task, return -32021 (Missing Required Client ' +
+      `Capability); otherwise serve it as an ordinary call. ${SEMANTIC_REVIEW_NOTE}`;
 
     for (const file of filesFor(this, context)) {
       const sourceFile = getSourceFile(file);
@@ -171,6 +182,8 @@ export const legacyTaskCapabilityRule: ScannerRule = {
       if (sourceFile) {
         for (const property of collectPropertyPaths(sourceFile)) {
           if (!LEGACY_CAPABILITY_PATHS.some((pattern) => pattern.test(property.path))) continue;
+          // Task-augmented sampling/elicitation belongs to MCP2026-TASKS-004.
+          if (/tasks\.requests\.(?:sampling|elicitation)(\.|$)/.test(property.path)) continue;
           if (isInComment(file, property.start)) {
             const { line } = offsetToPosition(file, property.start);
             context.noteCommentOnlyMatch(this.id, file.relPath, line, property.path);
@@ -237,18 +250,22 @@ const LEGACY_TASK_IDENTIFIERS = [
   'ToolTaskHandler',
   'TaskRequestHandler',
   'CreateTaskRequestHandler',
-  'CreateTaskServerContext',
-  'TaskServerContext',
+  'CreateTaskRequestHandlerExtra',
+  'TaskRequestHandlerExtra',
   'TaskToolExecution',
   'callToolStream',
-  'requestStream',
   'ExperimentalServerTasks',
   'ExperimentalClientTasks',
   'ExperimentalMcpServerTasks',
 ];
 
-/** Legacy Task object fields that were renamed in the extension. */
-const LEGACY_TASK_FIELDS = ['pollInterval', 'statusMessage', 'lastUpdatedAt'];
+/**
+ * Legacy Task object fields that were renamed in the extension: pollInterval
+ * became pollIntervalMs and ttl became ttlMs. statusMessage and lastUpdatedAt
+ * are deliberately absent — SEP-2663 carries both forward unchanged, so
+ * flagging them would flag fully compliant code.
+ */
+const LEGACY_TASK_FIELDS = ['pollInterval', 'ttl'];
 
 const TASK_CONTEXT_NEEDLES = ['task', 'taskid'];
 
@@ -286,6 +303,10 @@ export const legacyTaskStructuresRule: ScannerRule = {
       `tasks/get, tasks/update and tasks/cancel must set Mcp-Name to params.taskId. ${SEMANTIC_REVIEW_NOTE}`;
 
     for (const file of filesFor(this, context)) {
+      // TaskStore, pollInterval and friends are everyday vocabulary in generic
+      // task-queue code; without an MCP signal they are not MCP Tasks surface.
+      if (!inMcpContext(context, file)) continue;
+
       for (const { hit } of matches(context, this, file, quotedLiteral(LEGACY_TASK_LITERALS))) {
         findings.push(
           buildFinding(this, hit, {
