@@ -77,9 +77,20 @@ const detectedDependency = z.strictObject({
 const repositoryClassification = z.strictObject({
   /**
    * Replaced by the sanitizer with the user-facing source label — never the
-   * worker's filesystem path. Constrained here so a bypass fails validation.
+   * worker's filesystem path.
+   *
+   * The shape is asserted here, not only in the database CHECK constraint,
+   * because this schema is what the web app runs over a report it read back and
+   * did not construct. A row written by an older or compromised writer must not
+   * render.
    */
-  root: z.string().min(1).max(200),
+  root: z
+    .string()
+    .min(1)
+    .max(200)
+    .refine((value) => !/^[/~]/.test(value), { message: 'root is an absolute path' })
+    .refine((value) => !/^[A-Za-z]:/.test(value), { message: 'root is a drive-letter path' })
+    .refine((value) => !value.startsWith('\\\\'), { message: 'root is a UNC path' }),
   singleFile: z.boolean(),
   isLikelyMcpServer: z.boolean(),
   mcpEvidence: z.array(z.string().max(1000)).max(200),

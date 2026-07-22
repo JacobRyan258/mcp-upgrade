@@ -21,11 +21,13 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 describe('public package API', () => {
   it('exports only the documented runtime surface', () => {
     expect(Object.keys(publicApi).sort()).toEqual([
+      'ALWAYS_IGNORE_PATTERNS',
       'BASELINE_PROTOCOL_VERSION',
       'DEFAULT_TARGET_VERSION',
       'InternalScannerError',
       'RC_DISCLAIMER',
       'SCANNER_VERSION',
+      'SUPPORTED_EXTENSIONS',
       'UsageError',
       'assertScanReport',
       'isScanReport',
@@ -35,6 +37,14 @@ describe('public package API', () => {
       'scanPath',
       'toEvidence',
     ]);
+  });
+
+  it('exposes the discovery inputs a staging host needs to match', () => {
+    expect(publicApi.SUPPORTED_EXTENSIONS).toContain('.ts');
+    expect(publicApi.SUPPORTED_EXTENSIONS).toContain('.json');
+    expect(publicApi.SUPPORTED_EXTENSIONS.every((ext) => ext.startsWith('.'))).toBe(true);
+    expect(publicApi.ALWAYS_IGNORE_PATTERNS).toContain('node_modules');
+    expect(publicApi.ALWAYS_IGNORE_PATTERNS).toContain('.git');
   });
 
   it('exposes redaction that embedders can re-apply at their own boundary', () => {

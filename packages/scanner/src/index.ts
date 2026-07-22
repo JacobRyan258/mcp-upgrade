@@ -46,3 +46,12 @@ export {
   BASELINE_PROTOCOL_VERSION,
   RC_DISCLAIMER,
 } from './constants.js';
+/**
+ * Discovery inputs.
+ *
+ * Exported so a host that stages a repository before scanning — unpacking an
+ * archive, say — can pre-filter using exactly the same extension list and
+ * always-ignored directories the scanner will apply, instead of maintaining a
+ * second copy that silently drifts out of step.
+ */
+export { ALWAYS_IGNORE_PATTERNS, SUPPORTED_EXTENSIONS } from './constants.js';
