@@ -26,9 +26,19 @@ only produce findings when the repository or the specific file shows an MCP
 signal (an MCP dependency, SDK import, MCP method literal, or JSON-RPC
 vocabulary). Unambiguous MCP-specific literals (`mcp-session-id`,
 `notifications/roots/list_changed`, `logging/setLevel`, `sessionIdGenerator`)
-are always reported. Protocol literals inside multi-line template strings are
-downgraded to REVIEW: such strings are usually documentation or generated
-text, not protocol code.
+are recognised on their own and need no additional per-file MCP signal — header
+name matching is case-insensitive, so the idiomatic lowercase
+`req.headers['mcp-session-id']` is detected.
+
+Recognising a literal is not the same as reporting every occurrence of it. Each
+rule still requires the literal to appear in a position it understands: a header
+read or write, a notification send, a handler registration, or a transport
+constructor option. A bare `const M = 'notifications/roots/list_changed'` with
+no send site, or an unrelated `emitter.emit()` of the same string, is
+deliberately not reported — proving intent from a detached string constant is
+the kind of inference that produces false positives. Protocol literals inside
+multi-line template strings are downgraded to REVIEW: such strings are usually
+documentation or generated text, not protocol code.
 
 ---
 

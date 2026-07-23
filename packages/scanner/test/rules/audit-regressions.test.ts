@@ -674,3 +674,47 @@ describe('audit regressions — cross-platform report paths', () => {
     expect(sanitizeReportPath('lit\\eral.ts')).toBe('lit%5Ceral.ts');
   });
 });
+
+describe('audit regressions — duplicate findings', () => {
+  it('reports one finding when two patterns match the same configuration line', async () => {
+    // `nginx.ingress.kubernetes.io/affinity: "cookie"` matched both the full
+    // annotation pattern and the bare `affinity:` pattern at different columns,
+    // so span dedupe kept both. The reader saw the identical block twice and
+    // summary.counts double-counted one configuration line.
+    await withTempProject(
+      {
+        'package.json': SDK_PACKAGE,
+        'deploy/ingress.yaml': [
+          'apiVersion: networking.k8s.io/v1',
+          'metadata:',
+          '  annotations:',
+          '    nginx.ingress.kubernetes.io/affinity: "cookie"',
+        ].join('\n'),
+      },
+      async (dir) => {
+        const report = await reportFor(dir);
+        const findings = findingsFor(report, 'MCP2026-SESSION-004');
+        expect(findings).toHaveLength(1);
+        expect(report.summary.byRule['MCP2026-SESSION-004']).toBe(1);
+      },
+    );
+  });
+
+  it('keeps genuinely distinct violations on one minified line', async () => {
+    // The collapse keys on overlapping spans, not on the line: two separate
+    // violations far apart on one minified line occupy disjoint spans and stay
+    // two findings, even though the bounded evidence excerpt can render alike.
+    await withTempProject(
+      {
+        'package.json': SDK_PACKAGE,
+        'src/bundle.js': `const a={sessionAffinity:"ClientIP"};${'/* pad */'.repeat(60)}const b={stickySessions:true};`,
+      },
+      async (dir) => {
+        const report = await reportFor(dir);
+        const findings = findingsFor(report, 'MCP2026-SESSION-004');
+        expect(findings.length).toBeGreaterThanOrEqual(2);
+        expect(new Set(findings.map((finding) => finding.evidence)).size).toBeGreaterThanOrEqual(2);
+      },
+    );
+  });
+});

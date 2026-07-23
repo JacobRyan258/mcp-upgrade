@@ -224,7 +224,92 @@ export function dedupeByLocation(findings: Finding[]): Finding[] {
     if (!incumbent || outranks(finding, incumbent)) bySpan.set(key, finding);
   }
 
-  return [...bySpan.values()];
+  return dedupeByOverlappingSpan([...bySpan.values()]);
+}
+
+/** Field separator inside {@link FINDING_SPAN}. Matches `buildFinding`. */
+const SPAN_SEPARATOR = String.fromCharCode(0);
+
+/**
+ * Drops a finding that repeats an identical one over an overlapping span.
+ *
+ * Two patterns in a rule can match the same token through different routes —
+ * `nginx.ingress.kubernetes.io/affinity` and the bare `affinity:` key land on
+ * one annotation at different columns. Span dedupe cannot see that, because
+ * the columns genuinely differ, so the reader got the identical block twice
+ * and `summary.counts` charged one configuration mistake twice.
+ *
+ * Both halves of the test are load-bearing, and each protects a case the other
+ * would break:
+ *
+ * - Identical rendering alone is not enough. Evidence is bounded to a short
+ *   excerpt of the line, so two *distinct* violations on one minified line
+ *   routinely render the same while occupying disjoint spans. Requiring
+ *   overlap keeps them separate.
+ * - Overlap alone is not enough. Nested capability paths in a single object
+ *   literal (`capabilities.tasks` inside `capabilities.tasks.list`) overlap by
+ *   construction but carry different titles and remediations. Requiring
+ *   identical content keeps them separate.
+ *
+ * Only the surviving representative's own span is compared, so a chain of
+ * overlaps never transitively swallows a finding that overlaps nothing kept.
+ */
+function dedupeByOverlappingSpan(findings: Finding[]): Finding[] {
+  const groups = new Map<string, Finding[]>();
+  for (const finding of findings) {
+    const key = [
+      finding.ruleId,
+      finding.file,
+      finding.title,
+      finding.level,
+      finding.confidence,
+      finding.evidence,
+      finding.explanation,
+      finding.remediation,
+    ].join(SPAN_SEPARATOR);
+    const group = groups.get(key);
+    if (group) group.push(finding);
+    else groups.set(key, [finding]);
+  }
+
+  const kept: Finding[] = [];
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      kept.push(group[0] as Finding);
+      continue;
+    }
+    const spanned = group
+      .map((finding) => ({ finding, span: spanOf(finding) }))
+      // The widest match at a given start becomes the representative, so a
+      // nested pattern merges into the broader one rather than the reverse.
+      .sort((a, b) => a.span.start - b.span.start || b.span.end - a.span.end);
+
+    let representativeEnd = Number.NEGATIVE_INFINITY;
+    for (const { finding, span } of spanned) {
+      if (Number.isFinite(span.start) && span.start < representativeEnd) continue;
+      representativeEnd = Number.isFinite(span.end) ? span.end : Number.NEGATIVE_INFINITY;
+      kept.push(finding);
+    }
+  }
+
+  return kept;
+}
+
+/**
+ * Matched source span of a finding. A finding built outside
+ * {@link buildFinding} carries no span; it reports a non-finite range so it
+ * never merges with anything.
+ */
+function spanOf(finding: Finding): { start: number; end: number } {
+  const raw = (finding as SpannedFinding)[FINDING_SPAN];
+  if (raw === undefined) return { start: Number.NaN, end: Number.NaN };
+  const parts = raw.split(SPAN_SEPARATOR);
+  const start = Number(parts[1]);
+  const end = Number(parts[2]);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    return { start: Number.NaN, end: Number.NaN };
+  }
+  return { start, end };
 }
 
 const LEVEL_SEVERITY: Record<Finding['level'], number> = {
