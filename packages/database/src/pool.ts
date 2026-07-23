@@ -13,11 +13,28 @@ export type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 
 let pool: pg.Pool | null = null;
 
+/**
+ * The statement timeout the active pool was built with. `withTransaction` reads
+ * it so a transaction gets the same server-side cap the pool promised, without
+ * every call site having to thread the number through. Defaults to the same
+ * 20s used by `getPool` so a bare `withTransaction(fn, somePool)` still applies
+ * a bound.
+ */
+let configuredStatementTimeoutMs = 20_000;
+
 export interface PoolOptions {
   connectionString?: string;
   /** Maximum pooled connections. Keep low on serverless platforms. */
   max?: number;
-  /** Milliseconds a query may run before the server cancels it. */
+  /**
+   * Milliseconds a query may run before it is stopped. Enforced two ways that
+   * are both safe on Supabase's transaction pooler: a client-side
+   * `query_timeout` on the pool, and a transaction-scoped `SET LOCAL
+   * statement_timeout` inside `withTransaction`. It is deliberately NOT passed
+   * to `pg` as `statement_timeout`, which pg would put in the startup packet —
+   * the transaction pooler rejects that with
+   * `unsupported startup parameter: statement_timeout`.
+   */
   statementTimeoutMs?: number;
   /** Milliseconds to wait for a free connection before failing. */
   connectionTimeoutMs?: number;
@@ -112,15 +129,20 @@ export function getPool(options: PoolOptions = {}): pg.Pool {
   if (pool) return pool;
   const connectionString = readConnectionString(options.connectionString);
   const statementTimeout = options.statementTimeoutMs ?? 20_000;
+  configuredStatementTimeoutMs = statementTimeout;
   pool = new Pool({
     connectionString,
     ssl: resolveSslConfig(connectionString),
     max: options.max ?? 8,
     connectionTimeoutMillis: options.connectionTimeoutMs ?? 10_000,
     idleTimeoutMillis: 30_000,
-    // A runaway query must not pin a connection forever. Both timeouts are set
-    // server-side so they survive a client that stops reading.
-    statement_timeout: statementTimeout,
+    // Client-side read timeout. pg enforces this itself and tears the socket
+    // down if a query outruns it, so a runaway query cannot pin a pooled
+    // connection forever. Crucially it is NOT a Postgres startup parameter, so
+    // it is accepted by every pooler mode — including Supabase's transaction
+    // pooler, which rejects a `statement_timeout` startup parameter outright.
+    // The matching server-side cap is applied per transaction in
+    // `withTransaction` via `SET LOCAL`, which the pooler also accepts.
     query_timeout: statementTimeout,
   });
   // A pool that emits `error` with no listener crashes the process. Idle
@@ -160,10 +182,21 @@ export async function closePool(): Promise<void> {
 export async function withTransaction<T>(
   handler: (client: pg.PoolClient) => Promise<T>,
   poolOverride?: pg.Pool,
+  options: { statementTimeoutMs?: number } = {},
 ): Promise<T> {
   const client = await (poolOverride ?? getPool()).connect();
+  const timeoutMs = options.statementTimeoutMs ?? configuredStatementTimeoutMs;
   try {
     await client.query('begin');
+    // Server-side cancellation, scoped to THIS transaction. `SET LOCAL` reverts
+    // at commit/rollback, so on the transaction pooler it never leaks onto the
+    // next borrower of a multiplexed connection — the reason a bare `SET` (or a
+    // startup-level `statement_timeout`) is unsafe there. The value is an
+    // integer we control; `SET` cannot be parameterised, so it is floored to an
+    // integer before interpolation to keep it injection-proof.
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      await client.query(`set local statement_timeout = ${Math.floor(timeoutMs)}`);
+    }
     const result = await handler(client);
     await client.query('commit');
     return result;
