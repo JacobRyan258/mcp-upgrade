@@ -78,6 +78,23 @@ function priceOf(subscription: Stripe.Subscription): string | null {
 }
 
 /**
+ * Whether the subscription is set to stop renewing.
+ *
+ * Older Stripe API versions expressed this only as the boolean
+ * `cancel_at_period_end`. Newer ones (observed from `2026-06-24`) leave that
+ * `false` and instead set `cancel_at` to the instant the subscription will end
+ * while it is still `active` — the customer portal's "cancel at period end" now
+ * produces exactly that shape. Reading only the boolean would miss a pending
+ * cancellation entirely, which is the same class of API-version drift `periodOf`
+ * already guards against, so both shapes are honoured.
+ */
+function isSetToCancel(subscription: Stripe.Subscription): boolean {
+  if (subscription.cancel_at_period_end) return true;
+  const cancelAt = (subscription as unknown as Record<string, unknown>).cancel_at;
+  return typeof cancelAt === 'number' && cancelAt > 0;
+}
+
+/**
  * Reads the current period from a subscription.
  *
  * Recent Stripe API versions moved `current_period_start` / `current_period_end`
@@ -117,7 +134,7 @@ function fromSubscription(
     status: subscription.status ?? null,
     currentPeriodStart: period.start,
     currentPeriodEnd: period.end,
-    cancelAtPeriodEnd: Boolean(subscription.cancel_at_period_end),
+    cancelAtPeriodEnd: isSetToCancel(subscription),
     userIdHint,
     eventAt,
   };
