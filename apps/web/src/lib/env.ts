@@ -18,6 +18,7 @@
  * so they cannot apply in production.
  */
 import { z } from 'zod';
+import { validateStripeConfig } from '@mcp-upgrade/shared';
 
 const publicSchema = z.object({
   NEXT_PUBLIC_APP_URL: z.string().url(),
@@ -138,20 +139,29 @@ function isHostedDeployment(): boolean {
  * until this hardening pass, which meant none of the checks below had ever run.
  */
 export function assertEnvironment(): void {
-  readPublicEnv();
+  const publicEnv = readPublicEnv();
   const env = readServerEnv();
-  if (env.NODE_ENV !== 'production') return;
 
-  // Runtime-read, so this is always both checkable and meaningful. A live-mode
-  // key in a deployment configured for test mode is a deliberate guard rail
-  // while this product is pre-launch; removing it is a conscious act, which is
-  // the point.
-  if (env.STRIPE_SECRET_KEY?.startsWith('sk_live_')) {
-    throw new Error(
-      'STRIPE_SECRET_KEY is a live-mode key. This deployment is configured for test mode only.',
-    );
+  // Deliberately NOT gated on NODE_ENV. The previous version only ran these in
+  // production, which is exactly backwards: a developer running against a live
+  // key, or against a signing secret that is really an endpoint id, is the
+  // person who most needs to be told. Both mistakes were present in this
+  // repository and both survived because nothing checked outside production.
+  //
+  // The check is on "is positively test mode", not "is not sk_live_". A
+  // restricted live key (`rk_live_`) is a live credential, and a truncated or
+  // malformed value is not something to give the benefit of the doubt to.
+  const problems = validateStripeConfig({
+    publishableKey: publicEnv.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY,
+    secretKey: env.STRIPE_SECRET_KEY,
+    webhookSecret: env.STRIPE_WEBHOOK_SECRET,
+    priceId: env.STRIPE_PRO_MONTHLY_PRICE_ID,
+  });
+  if (problems.length > 0) {
+    throw new Error(`Stripe configuration is invalid:\n${problems.map((p) => `  ${p}`).join('\n')}`);
   }
 
+  if (env.NODE_ENV !== 'production') return;
   if (!isHostedDeployment()) return;
 
   const app = readPublicEnv().NEXT_PUBLIC_APP_URL;

@@ -18,6 +18,7 @@
  */
 import { NextResponse } from 'next/server';
 import type Stripe from 'stripe';
+import { stripeKeyMode } from '@mcp-upgrade/shared';
 import {
   applySubscription,
   claimStripeEvent,
@@ -59,6 +60,19 @@ export async function POST(request: Request): Promise<NextResponse> {
     // Never echo the reason: it tells a prober how close their forgery was.
     logEvent('warn', 'stripe.signature_rejected');
     return NextResponse.json({ error: 'invalid_signature' }, { status: 400 });
+  }
+
+  // A verified signature proves the event came from the endpoint this secret
+  // belongs to, but not that the endpoint and the API key are the same mode.
+  // Configuring a live-mode signing secret alongside a test-mode key is a
+  // plausible copy-paste error, and it would otherwise surface as a confusing
+  // failure inside `hydrate` — a subscription lookup against the wrong ledger —
+  // long after the event was accepted. Refuse it at the door instead, and do
+  // not claim the event id, so fixing the configuration lets the delivery be
+  // retried rather than being discarded as already seen.
+  if (event.livemode !== (stripeKeyMode(env.STRIPE_SECRET_KEY) === 'live')) {
+    logEvent('warn', 'stripe.mode_mismatch', { eventType: event.type });
+    return NextResponse.json({ error: 'mode_mismatch' }, { status: 400 });
   }
 
   const claim = await claimStripeEvent(
@@ -158,6 +172,18 @@ async function hydrate(plan: SubscriptionUpdate): Promise<SubscriptionUpdate | n
 
   const hydrated = planEvent(synthetic);
   if (hydrated.kind !== 'subscription') return null;
+
+  // The user was resolved from the *event's* customer, but the state about to
+  // be written comes from the *fetched subscription*. Those are the same
+  // customer in every flow Stripe produces, so this is a consistency assertion
+  // rather than a known hole — and it is the kind of assertion worth having,
+  // because if it ever failed we would be writing one customer's subscription,
+  // price and period onto another customer's user.
+  if (hydrated.customerId !== plan.customerId) {
+    logEvent('warn', 'stripe.hydrated_customer_mismatch');
+    return null;
+  }
+
   // Keep the original event's timestamp so ordering is judged by when Stripe
   // emitted the event, not by when we happened to read the subscription.
   return { ...hydrated, eventAt: plan.eventAt, userIdHint: plan.userIdHint };

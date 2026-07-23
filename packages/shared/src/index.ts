@@ -31,6 +31,33 @@ export type {
 } from './plans.js';
 
 export {
+  stripeKeyMode,
+  stripeKeyKind,
+  isLiveModeKey,
+  isTestModeKey,
+  maskSecret,
+  describeStripeKey,
+  isWebhookSigningSecret,
+  isWebhookEndpointId,
+  isPriceId,
+  validateStripeConfig,
+} from './stripe-keys.js';
+export type { StripeKeyMode, StripeKeyKind, StripeConfigInput } from './stripe-keys.js';
+
+export { HANDLED_EVENTS, isHandledEvent } from './stripe-events.js';
+export type { HandledEvent } from './stripe-events.js';
+
+export {
+  PRO_PRODUCT_NAME,
+  PRO_PRODUCT_DESCRIPTION,
+  PRO_PRICE_LOOKUP_KEY,
+  PRO_PRICE_CONTRACT,
+  PRO_PRODUCT_METADATA,
+  describePriceMismatch,
+} from './stripe-product.js';
+export type { ProPriceContract, PriceFacts, ProductFacts } from './stripe-product.js';
+
+export {
   SCAN_ERROR_CATEGORIES,
   isScanErrorCategory,
   describeScanError,

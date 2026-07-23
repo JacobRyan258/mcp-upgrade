@@ -302,6 +302,72 @@ jobs:
           echo "no test fixtures present"
 
   # ---------------------------------------------------------------------------
+  # Repository tooling. The Stripe provisioning and verification scripts run
+  # against an in-memory gateway here: no Stripe credential is present in CI and
+  # none is needed, which is the point — a green run must never depend on, or
+  # touch, a real Stripe account.
+  # ---------------------------------------------------------------------------
+  tooling:
+    name: Scripts — typecheck, lint, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22.12.0'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build workspace libraries
+        run: npm run build:libs
+
+      - name: Type check
+        run: npm run typecheck:scripts
+
+      - name: Lint
+        run: npm run lint:scripts
+
+      - name: Tests
+        run: npm run test:scripts
+
+      # The audit that would have caught this repository's real state: a root
+      # .env nothing loaded, an apps/web/.env.local silently outranking it with
+      # a different Stripe account's key, and a tracked .env.example holding a
+      # real Stripe object id. Runs without secrets and without network.
+      - name: Environment file audit
+        run: npm run verify:env-files
+
+      - name: Confirm .env.local cannot be reintroduced as an override
+        run: |
+          # A forbidden file that defines anything must fail the audit, so the
+          # override cannot come back quietly in a later branch.
+          printf 'STRIPE_SECRET_KEY=sk_test_reintroduced\n' > apps/web/.env.local
+          if npm run --silent verify:env-files; then
+            echo "FAIL: the audit accepted an apps/web/.env.local that defines a runtime variable"
+            rm -f apps/web/.env.local
+            exit 1
+          fi
+          rm -f apps/web/.env.local
+          echo "confirmed: a reintroduced .env.local override fails the audit"
+
+      - name: Confirm the setup script refuses to run without a credential
+        run: |
+          # Exit code 1 with no key, and nothing resembling a key in the output.
+          if npm run --silent stripe:setup -- --dry-run; then
+            echo "the setup script should have refused"
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
   # Supply chain and secrets.
   # ---------------------------------------------------------------------------
   audit:

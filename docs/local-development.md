@@ -55,10 +55,27 @@ npm run verify
 
 ## Environment
 
-Copy `.env.example`. The web block goes in `apps/web/.env.local`, the worker
-block in `apps/worker/.env`. Both applications validate their configuration at
-startup and refuse to run if something required is missing, so a typo produces a
-list of problems rather than a confusing failure on the first request.
+There is exactly one local runtime file: `.env` at the repository root.
+
+```bash
+cp .env.example .env && chmod 600 .env   # then fill in real values
+```
+
+Every command — dev, build, start, worker, migrations, Stripe scripts — loads
+it through `scripts/with-env.mjs`. There is no per-workspace env file:
+`apps/web/.env.local` and `apps/worker/.env` are kept deliberately empty, and
+**defining any variable in them is a hard startup error**. Next.js loads
+`.env.local` automatically and would otherwise outrank root `.env`; preloading
+root `.env` first closes that override, because `@next/env` never replaces a
+variable already set in `process.env`. `npm run verify:env-files` audits this,
+and the startup banner names which file was loaded (never a secret value).
+
+Both applications validate their configuration at startup and refuse to run if
+something required is missing, so a typo produces a list of problems rather than
+a confusing failure on the first request. All Stripe values must additionally
+belong to the same account and mode — the price is resolved against the Stripe
+API at startup, so a cross-account price id fails to boot rather than at
+checkout.
 
 Generate the shared secret with:
 
@@ -106,24 +123,45 @@ they do not touch object storage.
 Billing is optional. With the three Stripe variables unset the application runs
 Free-plan-only and says so on the billing page.
 
-To enable it:
+To enable it, provision the Stripe side with the setup script rather than
+clicking through the dashboard:
 
-1. In the Stripe dashboard, in **test mode**, create a product with a recurring
-   monthly price. Copy the price id (`price_...`) into
-   `STRIPE_PRO_MONTHLY_PRICE_ID`.
-2. Copy the test secret key (`sk_test_...`) into `STRIPE_SECRET_KEY`.
-3. Forward webhooks to your local server:
+```bash
+# Put the test-mode keys in root .env first (sk_test_ / pk_test_). The setup
+# script loads root .env for you — no separate export step.
+npm run stripe:setup:dry-run                     # see the plan
+npm run stripe:setup -- --write-env .env         # do it
+```
 
-   ```bash
-   stripe listen --forward-to localhost:3000/api/stripe/webhook
-   ```
+That creates or reuses the product, the $19/month price and the customer portal
+configuration, and writes `STRIPE_PRO_MONTHLY_PRICE_ID` into root `.env`. It
+refuses to write to any file that git tracks or does not ignore, and takes a
+backup first.
 
-   Copy the `whsec_...` it prints into `STRIPE_WEBHOOK_SECRET`.
+Then forward webhooks. No endpoint is registered for `localhost` — Stripe cannot
+reach it — so the CLI is how deliveries arrive locally, and it prints its own
+signing secret, which is a *different* value from any registered endpoint's:
 
-4. Use card `4242 4242 4242 4242`, any future expiry, any CVC.
+```bash
+npm run stripe:listen
+```
 
-A production build refuses to start with an `sk_live_` key. That guard is
-deliberate; removing it should be a conscious decision.
+Copy the `whsec_...` it prints into `STRIPE_WEBHOOK_SECRET` in root `.env`, then
+start the app and check the result:
+
+```bash
+npm run dev:web
+npm run verify:stripe-env
+```
+
+Pay with card `4242 4242 4242 4242`, any future expiry, any CVC.
+
+A production build refuses to start with a live-mode key, restricted (`rk_live_`)
+or full (`sk_live_`). That guard is deliberate; removing it should be a conscious
+decision.
+
+`docs/stripe.md` has the full reference: every flag, what "safe to rerun" means
+case by case, the restricted-key permission matrices, and the production steps.
 
 Useful events to replay while testing:
 
@@ -193,8 +231,19 @@ docker compose down -v && docker compose up -d db && npm run db:migrate
 
 ## Common problems
 
-**`DATABASE_URL is not set`** — the database package refuses to guess. Export it
-or put it in the relevant `.env` file.
+**`DATABASE_URL is not set`** — the database package refuses to guess. Put it in
+root `.env` (loaded automatically) or export it for a one-off command.
+
+**`Forbidden environment file(s) define runtime variables`** — something was
+written into `apps/web/.env.local` or `apps/worker/.env`. Move it into root
+`.env` and comment the line out of the forbidden file. `npm run verify:env-files`
+lists exactly what to fix.
+
+**`unsupported startup parameter: statement_timeout`** — the `DATABASE_URL`
+points at a PgBouncer transaction-mode pooler, which rejects that startup
+parameter (the pool sets it in `packages/database/src/pool.ts`). Use the session
+pooler / direct connection string, or a pooler that ignores it. See
+`docs/hosting-vercel.md`.
 
 **Migration says a file has changed** — an already-applied migration was edited.
 Migrations are checksummed. Add a new one instead; on a disposable database,

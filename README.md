@@ -34,13 +34,22 @@ in the root scripts, which is deterministic and adds no dependency.
 ```bash
 npm install
 npm run build:libs
+cp .env.example .env && chmod 600 .env    # then fill in real values
 docker compose up -d db
-DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/mcp_upgrade_test npm run db:migrate
+npm run db:migrate
 npm run dev:web
 ```
 
+Configuration lives in **one** file: `.env` at the repository root, loaded by
+`scripts/with-env.mjs` for every command. Per-workspace env files
+(`apps/web/.env.local`, `apps/worker/.env`) are deliberately empty and defining
+anything in them is a startup error; `npm run verify:env-files` enforces it.
+
 Full instructions, including Supabase and Stripe setup, are in
-[`docs/local-development.md`](docs/local-development.md).
+[`docs/local-development.md`](docs/local-development.md). Billing has its own
+reference — provisioning script, restricted-key permissions, production steps —
+in [`docs/stripe.md`](docs/stripe.md), and Vercel hosting in
+[`docs/hosting-vercel.md`](docs/hosting-vercel.md).
 
 ## Verification
 

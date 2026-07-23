@@ -14,21 +14,16 @@
  */
 import type Stripe from 'stripe';
 
-/** The events this application acts on. Anything else is acknowledged and ignored. */
-export const HANDLED_EVENTS = [
-  'checkout.session.completed',
-  'customer.subscription.created',
-  'customer.subscription.updated',
-  'customer.subscription.deleted',
-  'invoice.paid',
-  'invoice.payment_failed',
-] as const;
-
-export type HandledEvent = (typeof HANDLED_EVENTS)[number];
-
-export function isHandledEvent(type: string): type is HandledEvent {
-  return (HANDLED_EVENTS as readonly string[]).includes(type);
-}
+/**
+ * The events this application acts on. Anything else is acknowledged and
+ * ignored.
+ *
+ * Defined in `@mcp-upgrade/shared` and re-exported here so the handler and
+ * `scripts/setup-stripe.ts` — which subscribes the Stripe endpoint to exactly
+ * this list — cannot disagree about it.
+ */
+export { HANDLED_EVENTS, isHandledEvent } from '@mcp-upgrade/shared';
+export type { HandledEvent } from '@mcp-upgrade/shared';
 
 export interface SubscriptionUpdate {
   kind: 'subscription';

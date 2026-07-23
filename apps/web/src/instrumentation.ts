@@ -16,4 +16,12 @@ export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
   const { assertEnvironment } = await import('./lib/env');
   assertEnvironment();
+
+  // Static validation cannot tell a price id belonging to this Stripe account
+  // from one belonging to another; only Stripe can. This resolves the price and
+  // refuses to start if it is the wrong mode, the wrong amount or missing —
+  // while tolerating Stripe simply being unreachable, which is a different
+  // problem and must not take the deployment down with it.
+  const { assertStripeResources } = await import('./lib/stripe/resources');
+  await assertStripeResources();
 }

@@ -266,6 +266,41 @@ test.describe('billing', () => {
     expect(url).toContain('checkout.stripe.com');
   });
 
+  test('the session is a test-mode object priced from configuration, not the request', async ({
+    page,
+  }) => {
+    await signIn(page, user.email);
+
+    // Post a forged price. The route reads no body, so this must have no
+    // effect — the whole defence against checking out against a cheaper price.
+    const response = await page.request.post('/api/stripe/checkout', {
+      headers: { 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
+      data: { priceId: 'price_attacker_controlled', price: 'price_attacker_controlled' },
+    });
+    expect(response.status()).toBe(200);
+    const { url } = (await response.json()) as { url: string };
+
+    // Resolve the session id from the redirect and inspect it via the API. The
+    // Stripe module is imported dynamically so this file still loads when the
+    // billing suite is skipped and Stripe is not installed in the test env.
+    const sessionId = new URL(url).pathname.split('/').pop() ?? '';
+    // The pay page URL carries the session id in the fragment on some Stripe
+    // versions; fall back to listing the customer's most recent session.
+    const { default: Stripe } = await import('stripe');
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
+
+    const session = sessionId.startsWith('cs_')
+      ? await stripe.checkout.sessions.retrieve(sessionId, { expand: ['line_items'] })
+      : (
+          await stripe.checkout.sessions.list({ limit: 1, expand: ['data.line_items'] })
+        ).data[0]!;
+
+    expect(session.livemode).toBe(false);
+    const lineItemPrice = session.line_items?.data[0]?.price?.id;
+    expect(lineItemPrice).toBe(process.env.STRIPE_PRO_MONTHLY_PRICE_ID);
+    expect(lineItemPrice).not.toBe('price_attacker_controlled');
+  });
+
   test('returning from checkout does not by itself grant Pro', async ({ page }) => {
     await signIn(page, user.email);
     // The success URL is attacker-replayable, so it must change nothing. Only

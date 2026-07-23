@@ -1,0 +1,22 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "types": ["node"],
+    // These files are run by tsx and never compiled, so importing a sibling by
+    // its real `.ts` name is both allowed and honest — it is what the runtime
+    // actually resolves.
+    "allowImportingTsExtensions": true,
+    // The environment loader is plain `.mjs` on purpose: it runs from bare
+    // `node` before anything is built, so it cannot be a `.ts` that needs
+    // compiling. `allowJs` lets tsc resolve it and read its JSDoc types when a
+    // test imports it, so the import is checked rather than silently `any`.
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": ["**/*.ts", "env/*.mjs", "*.mjs"],
+  "exclude": ["node_modules"]
+}
