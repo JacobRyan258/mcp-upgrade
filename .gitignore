@@ -28,3 +28,6 @@ blob-report/
 
 # Local service state
 .supabase/
+
+# Playwright local run output
+apps/web/test-results/

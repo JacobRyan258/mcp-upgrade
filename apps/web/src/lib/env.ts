@@ -112,28 +112,59 @@ export function resetEnvCache(): void {
 }
 
 /**
+ * True when this process is a real hosted deployment rather than a local
+ * production-mode build.
+ *
+ * The distinction matters because `NEXT_PUBLIC_APP_URL` is *inlined at build
+ * time*. Reading it here returns the value the bundle was compiled with, not
+ * whatever the environment says now, so the URL assertions below are really
+ * asking "was this artifact built for production?" — a question that only has a
+ * meaningful answer on a deployment. Asking it of a developer's local
+ * `next start`, which is legitimately built with a localhost URL, would refuse
+ * to serve a perfectly correct build and teach people to delete the check.
+ *
+ * Vercel sets `VERCEL_ENV` on every deployment; `DEPLOY_ENV` is the escape
+ * hatch for any other host.
+ */
+function isHostedDeployment(): boolean {
+  return Boolean(process.env.VERCEL_ENV ?? process.env.DEPLOY_ENV);
+}
+
+/**
  * Validates everything at once.
  *
  * Called from `instrumentation.ts` so a misconfigured deployment fails when the
- * server starts rather than on a user's first request.
+ * server starts rather than on a user's first request. That file did not exist
+ * until this hardening pass, which meant none of the checks below had ever run.
  */
 export function assertEnvironment(): void {
   readPublicEnv();
   const env = readServerEnv();
-  if (env.NODE_ENV === 'production') {
-    const app = readPublicEnv().NEXT_PUBLIC_APP_URL;
-    if (app.startsWith('http://')) {
-      throw new Error('NEXT_PUBLIC_APP_URL must use https in production.');
-    }
-    if (/localhost|127\.0\.0\.1/.test(app)) {
-      throw new Error('NEXT_PUBLIC_APP_URL still points at localhost in production.');
-    }
-    if (env.STRIPE_SECRET_KEY?.startsWith('sk_live_')) {
-      // A deliberate guard rail while this product is pre-launch. Removing it
-      // is a conscious act, which is the point.
-      throw new Error(
-        'STRIPE_SECRET_KEY is a live-mode key. This deployment is configured for test mode only.',
-      );
-    }
+  if (env.NODE_ENV !== 'production') return;
+
+  // Runtime-read, so this is always both checkable and meaningful. A live-mode
+  // key in a deployment configured for test mode is a deliberate guard rail
+  // while this product is pre-launch; removing it is a conscious act, which is
+  // the point.
+  if (env.STRIPE_SECRET_KEY?.startsWith('sk_live_')) {
+    throw new Error(
+      'STRIPE_SECRET_KEY is a live-mode key. This deployment is configured for test mode only.',
+    );
+  }
+
+  if (!isHostedDeployment()) return;
+
+  const app = readPublicEnv().NEXT_PUBLIC_APP_URL;
+  if (app.startsWith('http://')) {
+    throw new Error(
+      'NEXT_PUBLIC_APP_URL must use https in production. It is inlined at build time, ' +
+        'so set it in the deployment environment before the build runs, not only at runtime.',
+    );
+  }
+  if (/localhost|127\.0\.0\.1/.test(app)) {
+    throw new Error(
+      'NEXT_PUBLIC_APP_URL still points at localhost in production. It is inlined at ' +
+        'build time, so this deployment was built with the wrong value.',
+    );
   }
 }

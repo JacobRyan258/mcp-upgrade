@@ -10,13 +10,18 @@ import { NextResponse } from 'next/server';
 import { getSubscription } from '@mcp-upgrade/database';
 import { requireUser } from '../../../../lib/auth';
 import { billingConfigured, readPublicEnv } from '../../../../lib/env';
+import { isSameOrigin } from '../../../../lib/origin';
 import { getStripe } from '../../../../lib/stripe/client';
 import { logEvent } from '../../../../lib/log';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export async function POST(): Promise<NextResponse> {
+export async function POST(request: Request): Promise<NextResponse> {
+  if (!isSameOrigin(request)) {
+    return NextResponse.json({ error: 'forbidden' }, { status: 403 });
+  }
+
   const user = await requireUser();
   if (!user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   if (!billingConfigured()) {

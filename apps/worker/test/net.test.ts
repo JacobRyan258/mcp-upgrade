@@ -367,3 +367,76 @@ describe('redirects are re-validated on every hop', () => {
     ).toBe('source_url_forbidden_host');
   });
 });
+
+/**
+ * Connection pinning.
+ *
+ * `validateTarget` proves every resolved address is public, then `safeFetch` is
+ * supposed to connect to the address it just verified rather than resolving the
+ * hostname a second time. Without that, the gap between the check and the
+ * connect is a DNS-rebinding window: the same name answers with a public
+ * address for the check and a private one for the connection.
+ *
+ * This regressed silently once already. The pinning was expressed as a
+ * `node:https.Agent` passed in an `agent` field, but Node's global fetch is
+ * undici, which reads `dispatcher` and ignores `agent` without complaint. The
+ * code compiled, every existing test passed, and nothing was pinned. These two
+ * tests fail against that spelling: the first proves the mechanism actually
+ * diverts a connection, the second proves `safeFetch` uses that mechanism.
+ */
+describe('the connection is pinned to the verified address', () => {
+  it('honours a dispatcher lookup, so a pinned address really is where we connect', async () => {
+    const { createServer } = await import('node:http');
+    const { Agent } = await import('undici');
+
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.end('reached-the-pinned-server');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    const port = typeof address === 'object' && address ? address.port : 0;
+
+    let lookupCalls = 0;
+    const dispatcher = new Agent({
+      connect: {
+        lookup: (_hostname, _options, callback) => {
+          lookupCalls += 1;
+          callback(null, [{ address: '127.0.0.1', family: 4 }]);
+        },
+      },
+      pipelining: 0,
+    });
+
+    try {
+      // A hostname that does not resolve to 127.0.0.1 by any normal means. If
+      // the dispatcher is ignored, this cannot reach the local server at all.
+      const response = await fetch(`http://pinning-probe.invalid:${port}/`, {
+        dispatcher,
+      } as unknown as RequestInit);
+      expect(await response.text()).toBe('reached-the-pinned-server');
+      expect(lookupCalls).toBeGreaterThan(0);
+    } finally {
+      await dispatcher.close().catch(() => undefined);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('passes a dispatcher to fetch, never a bare `agent` that undici discards', async () => {
+    let seen: RequestInit | undefined;
+    const capturingFetch = vi.fn(async (_url: unknown, init: RequestInit) => {
+      seen = init;
+      return new Response('ok', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await safeFetch('https://api.github.com/repos/o/r', {
+      timeoutMs: 5_000,
+      fetchImpl: capturingFetch,
+      resolver: async () => [{ address: '140.82.121.4', family: 4 }],
+    });
+
+    const init = seen as (RequestInit & { dispatcher?: unknown; agent?: unknown }) | undefined;
+    expect(init?.dispatcher).toBeDefined();
+    expect(init?.agent).toBeUndefined();
+  });
+});

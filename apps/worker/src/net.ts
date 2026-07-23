@@ -19,7 +19,7 @@
  */
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
-import { Agent } from 'node:https';
+import { Agent } from 'undici';
 import type { LookupAddress } from 'node:dns';
 import { IngestionError } from './errors.js';
 
@@ -185,6 +185,18 @@ export interface SafeFetchOptions {
   resolver?: AddressResolver;
 }
 
+/**
+ * `fetch` init carrying an undici dispatcher.
+ *
+ * Two copies of undici's type definitions are reachable here — the ones bundled
+ * with `@types/node` and the ones shipped by the `undici` package the runtime
+ * `Agent` comes from — and TypeScript treats their `Dispatcher` types as
+ * unrelated. Widening just that one field, rather than casting the whole init
+ * object through `unknown`, keeps `redirect`, `signal` and `headers` fully
+ * type-checked while letting the dispatcher through.
+ */
+type PinnedFetchInit = Omit<RequestInit, 'dispatcher'> & { dispatcher: unknown };
+
 export interface SafeResponse {
   status: number;
   headers: Headers;
@@ -213,17 +225,21 @@ export async function safeFetch(
     // Pin the connection to the address that was just verified, while keeping
     // the SNI and Host header set to the real hostname so TLS still validates
     // against the certificate for that name.
-    const agent = new Agent({
-      lookup: (_hostname, _opts, callback) => {
-        // Node's overloads make this signature awkward to type precisely; the
-        // contract is (err, address, family).
-        (callback as (err: Error | null, address: string, family: number) => void)(
-          null,
-          target.address,
-          target.family,
-        );
+    //
+    // This must be an undici `Agent` passed as `dispatcher`, not a
+    // `node:https.Agent` passed as `agent`. Node's global `fetch` is undici,
+    // and undici ignores an unrecognised `agent` property in silence — so the
+    // previous spelling compiled, ran, and pinned nothing at all. The check
+    // above still rejected private addresses, but the connection that followed
+    // did its own fresh DNS resolution, which is precisely the window a
+    // rebinding attack aims for.
+    const dispatcher = new Agent({
+      connect: {
+        lookup: (_hostname, _options, callback) => {
+          callback(null, [{ address: target.address, family: target.family }]);
+        },
       },
-      keepAlive: false,
+      pipelining: 0,
     });
 
     const controller = new AbortController();
@@ -232,25 +248,28 @@ export async function safeFetch(
     const timer = setTimeout(() => controller.abort(), options.timeoutMs);
 
     const doFetch = options.fetchImpl ?? fetch;
+    const init: PinnedFetchInit = {
+      redirect: 'manual',
+      signal: controller.signal,
+      headers: {
+        // A descriptive agent is required by the GitHub API and is good
+        // manners for the archive host.
+        'user-agent': 'mcp-upgrade-scanner (+https://github.com/JacobRyan258/mcp-upgrade)',
+        accept: 'application/vnd.github+json',
+        ...options.headers,
+      },
+      // `dispatcher` is the documented undici extension, and is what Node's
+      // fetch actually reads. `agent` is silently discarded.
+      dispatcher,
+    };
+
     let response: Response;
     try {
-      response = await doFetch(target.url, {
-        redirect: 'manual',
-        signal: controller.signal,
-        headers: {
-          // A descriptive agent is required by the GitHub API and is good
-          // manners for the archive host.
-          'user-agent': 'mcp-upgrade-scanner (+https://github.com/JacobRyan258/mcp-upgrade)',
-          accept: 'application/vnd.github+json',
-          ...options.headers,
-        },
-        // @ts-expect-error -- `dispatcher`/`agent` is not in the DOM lib types,
-        // but Node's fetch accepts an agent through this field.
-        agent,
-      });
+      response = await doFetch(target.url, init as RequestInit);
     } catch (error) {
       clearTimeout(timer);
       options.signal?.removeEventListener('abort', abortOnOuter);
+      await dispatcher.close().catch(() => undefined);
       if (controller.signal.aborted) {
         throw new IngestionError('source_download_failed', 'the request timed out');
       }
@@ -261,17 +280,24 @@ export async function safeFetch(
 
     const isRedirect = response.status >= 300 && response.status < 400;
     if (!isRedirect) {
+      // The dispatcher owns the socket the body is still streaming over, so it
+      // cannot be closed here — doing so truncates the archive mid-download.
+      // Ownership is handed to the body instead: whoever finishes, cancels or
+      // errors the stream releases the connection. A response with no body has
+      // nothing left to wait for and is released immediately.
       return {
         status: response.status,
         headers: response.headers,
         url: target.url.toString(),
-        body: response.body,
+        body: response.body ? releaseWhenDone(response.body, dispatcher) : null,
       };
     }
 
     const location = response.headers.get('location');
-    // Drain the redirect body so the socket is not left half-read.
+    // Drain the redirect body so the socket is not left half-read, then release
+    // this hop's dispatcher: the next hop resolves and pins a fresh address.
     await response.body?.cancel().catch(() => undefined);
+    await dispatcher.close().catch(() => undefined);
     if (!location) {
       throw new IngestionError('source_download_failed', 'redirect without a location');
     }
@@ -285,4 +311,40 @@ export async function safeFetch(
   }
 
   throw new IngestionError('source_download_failed', 'too many redirects');
+}
+
+/**
+ * Ties a dispatcher's lifetime to the response body streaming over it.
+ *
+ * Without this the per-request agent would be left for the garbage collector,
+ * which under a backlog means sockets accumulating faster than they are
+ * reclaimed. `destroy` rather than `close` on the abnormal paths, because a
+ * cancelled download should drop the connection rather than wait politely for
+ * an upstream that may never finish sending.
+ */
+function releaseWhenDone(
+  body: ReadableStream<Uint8Array>,
+  dispatcher: Agent,
+): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.close();
+          await dispatcher.close().catch(() => undefined);
+          return;
+        }
+        controller.enqueue(value);
+      } catch (error) {
+        controller.error(error);
+        await dispatcher.destroy().catch(() => undefined);
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason).catch(() => undefined);
+      await dispatcher.destroy().catch(() => undefined);
+    },
+  });
 }

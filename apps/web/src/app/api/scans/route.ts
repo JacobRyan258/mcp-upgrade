@@ -33,6 +33,7 @@ import {
 } from '@mcp-upgrade/shared';
 import { requireUser } from '../../../lib/auth';
 import { readServerEnv } from '../../../lib/env';
+import { isSameOrigin } from '../../../lib/origin';
 import { getPlanState } from '../../../lib/plan';
 import { logEvent } from '../../../lib/log';
 
@@ -48,11 +49,37 @@ function fail(code: string, message: string, status: number): NextResponse {
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
+  // Before anything else, and before the body is read: this endpoint is
+  // authenticated by a cookie and accepts multipart/form-data, which a plain
+  // cross-site HTML form can send with no preflight.
+  if (!isSameOrigin(request)) {
+    return fail('forbidden', 'This request did not come from the application.', 403);
+  }
+
   const user = await requireUser();
   if (!user) return fail('unauthorized', 'Sign in to start a scan.', 401);
 
   const plan = await getPlanState(user.id);
   const limits = ingestionLimitsFor(plan.limits);
+
+  // Reject an oversized upload from its declared length, before a single byte
+  // is buffered. `request.formData()` reads the entire body into memory, and
+  // App Router route handlers impose no body limit of their own, so without
+  // this the per-plan size check below only ran *after* an arbitrarily large
+  // upload had already been accepted into the process heap.
+  //
+  // The allowance is generous because multipart framing, the boundary and the
+  // part headers all count toward Content-Length while the plan limit applies
+  // to the file itself. A lying or absent header is still caught by the
+  // `file.size` check further down.
+  const declaredLength = Number(request.headers.get('content-length') ?? '');
+  if (Number.isFinite(declaredLength) && declaredLength > limits.maxArchiveBytes + 1024 * 1024) {
+    return fail(
+      'too_large',
+      `Your plan allows uploads up to ${formatBytes(limits.maxArchiveBytes)}.`,
+      413,
+    );
+  }
 
   // A cheap pre-check purely for a better message. It is *not* the enforcement
   // point — the database call below is — so a race here changes nothing.
