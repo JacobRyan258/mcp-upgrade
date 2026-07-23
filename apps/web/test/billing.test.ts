@@ -335,6 +335,28 @@ describe('subscription events', () => {
     expect(plan).toMatchObject({ cancelAtPeriodEnd: true });
   });
 
+  it('treats a set cancel_at as cancelling, even when the boolean is false', () => {
+    // Stripe API versions from 2026-06-24 report a portal "cancel at period end"
+    // as cancel_at_period_end:false with cancel_at set to the period end while
+    // the subscription is still active. Reading only the boolean missed it.
+    const plan = planEvent(
+      event('customer.subscription.updated', {
+        ...base,
+        cancel_at_period_end: false,
+        cancel_at: 1_753_600_000,
+        canceled_at: 1_751_000_100,
+      }),
+    );
+    expect(plan).toMatchObject({ cancelAtPeriodEnd: true, status: 'active' });
+  });
+
+  it('does not treat an ordinary active subscription as cancelling', () => {
+    const plan = planEvent(
+      event('customer.subscription.updated', { ...base, cancel_at: null }),
+    );
+    expect(plan).toMatchObject({ cancelAtPeriodEnd: false });
+  });
+
   it('reports past_due faithfully rather than smoothing it over', () => {
     const plan = planEvent(event('customer.subscription.updated', { ...base, status: 'past_due' }));
     expect(plan).toMatchObject({ status: 'past_due' });
