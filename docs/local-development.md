@@ -44,7 +44,7 @@ reproduced against a mock:
 ```bash
 docker compose up -d db
 TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/mcp_upgrade_test \
-  npm run test --workspace @mcp-upgrade/database   # 85 tests
+  npm run test --workspace @mcp-upgrade/database   # 116 tests
 ```
 
 Everything at once, plus typecheck, lint, secret scan and build:
@@ -144,7 +144,35 @@ docker build -f apps/worker/Dockerfile -t mcp-upgrade-worker .
 ```
 
 The image runs as a non-root user that does not own its own code, carries no
-compiler or package manager, and writes only to `/scans`.
+build tooling, and writes only to `/scans`.
+
+If you mount a volume or tmpfs at `/scans`, it **must** carry
+`uid=1000,gid=1000`. A mount replaces the directory the image created and
+arrives owned by root, so without those options the unprivileged runtime user
+cannot create its per-job directory and every scan fails with `EACCES`.
+`docker-compose.yml` already does this:
+
+```
+--tmpfs /scans:mode=0700,uid=1000,gid=1000,size=2g
+```
+
+To run the image directly against the local database, use the Postgres
+container's address rather than `host.docker.internal` — the database port is
+bound to host loopback, which the bridge network cannot reach:
+
+```bash
+PGIP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mcp-upgrade-test-db)
+docker run --rm \
+  -e DATABASE_URL="postgresql://postgres:postgres@$PGIP:5432/mcp_upgrade_test" \
+  -e WORKER_SHARED_SECRET="at-least-32-characters-long-value-here" \
+  -e SUPABASE_URL="https://your-project-ref.supabase.co" \
+  -e SUPABASE_SERVICE_ROLE_KEY="your-service-role-key" \
+  -p 127.0.0.1:8080:8080 \
+  --read-only --tmpfs /scans:mode=0700,uid=1000,gid=1000,size=512m \
+  --tmpfs /tmp:mode=1777,size=64m \
+  --security-opt no-new-privileges:true --cap-drop ALL \
+  mcp-upgrade-worker
+```
 
 ## Resetting local data
 

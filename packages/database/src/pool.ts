@@ -36,18 +36,76 @@ function readConnectionString(explicit?: string): string {
 /**
  * TLS policy.
  *
- * Supabase's pooler presents a certificate chain that Node does not trust out
- * of the box. Rather than globally disabling verification — which would also
- * weaken every other outbound TLS connection in the process — verification is
- * relaxed only for this pool, and only when the connection string does not
- * already state a `sslmode`. A deployment can opt into full verification by
- * setting `PGSSLROOTCERT` and `sslmode=verify-full`.
+ * Three inputs, in priority order, so an operator can always be explicit and
+ * the default is never surprising:
+ *
+ *   1. `sslmode=` in the connection string wins outright — `pg` parses it and
+ *      this function stays out of the way. This is the documented way to be
+ *      unambiguous.
+ *   2. `DATABASE_SSL` overrides the default: `disable`, `require` (verify the
+ *      chain) or `no-verify`.
+ *   3. Otherwise it is inferred from the host. A loopback or private address is
+ *      a database on a network we already control — a Compose service, a
+ *      private VPC, a CI service container — and those almost never terminate
+ *      TLS, so SSL is off. Anything reachable over the public internet gets TLS.
+ *
+ * The earlier version inferred only from loopback, which meant a worker talking
+ * to Postgres over a Docker bridge or a private VPC address tried to negotiate
+ * TLS against a server that does not speak it, and every connection failed.
+ *
+ * The public default is `rejectUnauthorized: false` because managed providers
+ * commonly present a chain Node does not trust out of the box. It is scoped to
+ * this pool rather than set globally, so no other outbound TLS in the process is
+ * weakened, and `DATABASE_SSL=require` opts into full verification.
  */
-function sslConfig(connectionString: string): pg.PoolConfig['ssl'] {
-  if (/sslmode=/.test(connectionString)) return undefined;
-  if (/(^|@)(localhost|127\.0\.0\.1|\[::1\])/.test(connectionString)) return false;
-  if (process.env.PGSSLROOTCERT) return undefined;
-  return { rejectUnauthorized: false };
+export function resolveSslConfig(
+  connectionString: string,
+  mode: string | undefined = process.env.DATABASE_SSL,
+): pg.PoolConfig['ssl'] {
+  if (/[?&]sslmode=/.test(connectionString)) return undefined;
+
+  const explicit = mode?.trim().toLowerCase();
+  if (explicit === 'disable' || explicit === 'false' || explicit === 'off') return false;
+  if (explicit === 'require' || explicit === 'verify-full') return { rejectUnauthorized: true };
+  if (explicit === 'no-verify') return { rejectUnauthorized: false };
+
+  return isPrivateHost(hostOf(connectionString)) ? false : { rejectUnauthorized: false };
+}
+
+/** Extracts the host from a connection string, tolerating a malformed one. */
+export function hostOf(connectionString: string): string {
+  try {
+    return new URL(connectionString).hostname.replace(/^\[|\]$/g, '');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * True for addresses that are, by construction, on a network we control:
+ * loopback, RFC1918, carrier-grade NAT, link-local, IPv6 unique-local, and
+ * bare hostnames with no dot (a Compose or Kubernetes service name).
+ */
+export function isPrivateHost(host: string): boolean {
+  if (host === '') return false;
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host === '::1' || host.toLowerCase().startsWith('fe80') || /^f[cd]/i.test(host)) return true;
+
+  const parts = host.split('.');
+  const numeric = parts.length === 4 && parts.every((part) => /^\d{1,3}$/.test(part));
+  if (numeric) {
+    const [a = 0, b = 0] = parts.map(Number);
+    if (a === 127 || a === 10 || a === 0) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    return false;
+  }
+
+  // A single-label host resolves only inside a container network or a search
+  // domain, so it is not something reachable from the public internet.
+  return !host.includes('.');
 }
 
 export function getPool(options: PoolOptions = {}): pg.Pool {
@@ -56,7 +114,7 @@ export function getPool(options: PoolOptions = {}): pg.Pool {
   const statementTimeout = options.statementTimeoutMs ?? 20_000;
   pool = new Pool({
     connectionString,
-    ssl: sslConfig(connectionString),
+    ssl: resolveSslConfig(connectionString),
     max: options.max ?? 8,
     connectionTimeoutMillis: options.connectionTimeoutMs ?? 10_000,
     idleTimeoutMillis: 30_000,

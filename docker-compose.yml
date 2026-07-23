@@ -47,9 +47,16 @@ services:
       - '127.0.0.1:8080:8080'
     # The container writes only to /scans. Everything else is read-only, which
     # is the same posture production should run with.
+    #
+    # `uid`/`gid` are not optional. A tmpfs (or any volume) mounted at /scans
+    # replaces the directory the image created and chowned, and comes back owned
+    # by root — so the unprivileged runtime user cannot create its per-job
+    # directory and every scan fails with EACCES. 1000:1000 is the `node` user
+    # in the base image. Any deployment that mounts a volume here must do the
+    # same.
     read_only: true
     tmpfs:
-      - /scans:mode=0700,size=2g
+      - /scans:mode=0700,uid=1000,gid=1000,size=2g
       - /tmp:mode=1777,size=64m
     security_opt:
       - no-new-privileges:true

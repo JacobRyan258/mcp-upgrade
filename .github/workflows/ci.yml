@@ -274,16 +274,23 @@ jobs:
           echo "image runs as: $user"
           test "$user" != "root"
 
-      - name: Confirm no build toolchain survived into the runtime image
+      - name: Confirm no build tooling or web dependency reached the image
         run: |
-          # A compiler or test runner inside a container that unpacks hostile
-          # archives is exactly the kind of thing to leave out.
-          if docker run --rm --entrypoint sh mcp-upgrade-worker:ci -c \
-             'ls node_modules/.bin/tsc node_modules/.bin/vitest' 2>/dev/null; then
-            echo "build tooling is present in the runtime image"
+          # A test runner or a whole web framework inside a container that
+          # unpacks hostile archives is exactly what to leave out. TypeScript is
+          # deliberately absent from this list: the scanner uses the compiler
+          # API to parse source, so it is a runtime dependency.
+          found=$(docker run --rm --entrypoint sh mcp-upgrade-worker:ci -c \
+            'ls -d node_modules/next node_modules/react node_modules/react-dom \
+                   node_modules/stripe node_modules/sharp node_modules/@playwright \
+                   node_modules/playwright-core node_modules/.bin/vitest \
+                   node_modules/.bin/eslint node_modules/.bin/next 2>/dev/null' || true)
+          if [ -n "$found" ]; then
+            echo "these should not be in the runtime image:"
+            echo "$found"
             exit 1
           fi
-          echo "no build tooling present"
+          echo "no build tooling or web-only dependency present"
 
       - name: Confirm the hostile archive fixtures were not shipped
         run: |

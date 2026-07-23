@@ -134,8 +134,18 @@ async function pollLoop(): Promise<void> {
       const batch = await Promise.all(Array.from({ length: slots }, () => processOne()));
       didWork = batch.some(Boolean);
     } catch (error) {
+      // The error *code* is included deliberately. A bare name reads "Error"
+      // for every failure, which made a TLS-negotiation failure against a
+      // plaintext Postgres indistinguishable from a wrong password. Postgres
+      // and libuv codes (ECONNREFUSED, 28P01, ENOTFOUND) name the fault
+      // without revealing the host, the credentials or the query.
+      const code =
+        error && typeof error === 'object' && 'code' in error
+          ? String((error as { code?: unknown }).code)
+          : undefined;
       log.error('queue.poll_failed', {
         detail: error instanceof Error ? error.name : 'unknown',
+        code,
       });
     }
     if (!shuttingDown && !didWork) {
