@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+/*
+ * A small, deliberately restrained design system. The product is a report a
+ * non-technical person forwards to a developer, so the visual language is
+ * closer to a medical result than a marketing page: high contrast, generous
+ * spacing, one accent colour, and severity communicated by label as well as by
+ * colour so it survives a monochrome print and colour-blind readers.
+ */
+@theme {
+  --color-ink: oklch(0.18 0.02 265);
+  --color-muted: oklch(0.52 0.02 265);
+  --color-line: oklch(0.91 0.01 265);
+  --color-surface: oklch(0.99 0.002 265);
+  --color-accent: oklch(0.52 0.19 262);
+  --color-accent-soft: oklch(0.96 0.03 262);
+
+  --color-danger: oklch(0.52 0.19 25);
+  --color-danger-soft: oklch(0.96 0.04 25);
+  --color-warn: oklch(0.52 0.13 75);
+  --color-warn-soft: oklch(0.96 0.05 85);
+  --color-review: oklch(0.48 0.14 285);
+  --color-review-soft: oklch(0.96 0.03 285);
+  --color-ok: oklch(0.48 0.15 155);
+  --color-ok-soft: oklch(0.95 0.05 155);
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--color-surface);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  line-height: 1.6;
+}
+
+/* Visible focus for keyboard users on every interactive element. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Respect a reduced-motion preference rather than animating regardless. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

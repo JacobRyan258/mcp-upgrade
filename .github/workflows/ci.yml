@@ -6,6 +6,7 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege by default. No job below needs to write anything.
 permissions:
   contents: read
 
@@ -14,8 +15,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Node ${{ matrix.node }} on ${{ matrix.os }}
+  # ---------------------------------------------------------------------------
+  # The published CLI. Same matrix and same gates as before the monorepo
+  # conversion, just run through the workspace.
+  # ---------------------------------------------------------------------------
+  scanner:
+    name: Scanner — Node ${{ matrix.node }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -44,20 +49,23 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build workspace libraries
+        run: npm run build:libs
+
       - name: Type check
-        run: npm run typecheck
+        run: npm run typecheck --workspace mcp-upgrade
 
       - name: Lint
-        run: npm run lint
+        run: npm run lint --workspace mcp-upgrade
 
       - name: Unit and CLI integration tests
-        run: npm test
+        run: npm run test --workspace mcp-upgrade
 
       - name: Build
-        run: npm run build
+        run: npm run build --workspace mcp-upgrade
 
   package:
-    name: Packed package on Node ${{ matrix.node }}
+    name: Packed CLI on Node ${{ matrix.node }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -80,14 +88,217 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build workspace libraries
+        run: npm run build:libs
+
       - name: Inspect npm dry run
-        run: npm pack --dry-run
+        run: npm pack --dry-run --workspace mcp-upgrade
 
       - name: Pack, inspect, install, and execute externally
         run: npm run verify:package
 
-  dependency-audit:
-    name: Production dependency audit
+  # ---------------------------------------------------------------------------
+  # Shared contracts and the worker. The worker suite includes the hostile
+  # archive corpus and the SSRF checks, so it needs no services.
+  # ---------------------------------------------------------------------------
+  libraries:
+    name: Shared and worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22.12.0'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build workspace libraries
+        run: npm run build:libs
+
+      - name: Type check
+        run: |
+          npm run typecheck --workspace @mcp-upgrade/shared
+          npm run typecheck --workspace @mcp-upgrade/worker
+
+      - name: Lint
+        run: |
+          npm run lint --workspace @mcp-upgrade/shared
+          npm run lint --workspace @mcp-upgrade/worker
+
+      - name: Shared tests
+        run: npm run test --workspace @mcp-upgrade/shared
+
+      - name: Worker tests — hostile archives, SSRF, sanitisation
+        run: npm run test --workspace @mcp-upgrade/worker
+
+      - name: Build worker
+        run: npm run build --workspace @mcp-upgrade/worker
+
+  # ---------------------------------------------------------------------------
+  # Database. Runs against a real Postgres: the guarantees under test are row
+  # locks, unique indexes and RLS policies, none of which a mock reproduces.
+  # ---------------------------------------------------------------------------
+  database:
+    name: Database — migrations, isolation, concurrency
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mcp_upgrade_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/mcp_upgrade_test
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/mcp_upgrade_test
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22.12.0'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build workspace libraries
+        run: npm run build:libs
+
+      - name: Type check and lint
+        run: |
+          npm run typecheck --workspace @mcp-upgrade/database
+          npm run lint --workspace @mcp-upgrade/database
+
+      - name: Validate migrations apply to an empty database
+        run: npm run db:migrate
+
+      - name: Validate migrations are idempotent
+        run: npm run db:migrate
+
+      - name: Database tests
+        run: npm run test --workspace @mcp-upgrade/database
+
+  # ---------------------------------------------------------------------------
+  # Web application. Built against placeholder configuration: no real secret is
+  # needed to prove the application compiles and renders.
+  # ---------------------------------------------------------------------------
+  web:
+    name: Web — typecheck, lint, tests, production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+      SUPABASE_SERVICE_ROLE_KEY: ci-placeholder-service-role-key
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+      WORKER_SHARED_SECRET: ci-placeholder-secret-at-least-32-characters
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22.12.0'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build workspace libraries
+        run: npm run build:libs
+
+      - name: Type check
+        run: npm run typecheck --workspace @mcp-upgrade/web
+
+      - name: Lint
+        run: npm run lint --workspace @mcp-upgrade/web
+
+      - name: Unit tests
+        run: npm run test --workspace @mcp-upgrade/web
+
+      - name: Production build
+        run: npm run build --workspace @mcp-upgrade/web
+
+  # ---------------------------------------------------------------------------
+  # Worker container. Proving the image builds, and that it did not accidentally
+  # become a build environment, is part of the deploy contract.
+  # ---------------------------------------------------------------------------
+  worker-image:
+    name: Worker container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Build the worker image
+        run: docker build -f apps/worker/Dockerfile -t mcp-upgrade-worker:ci .
+
+      - name: Confirm the image runs as a non-root user
+        run: |
+          user="$(docker run --rm --entrypoint id mcp-upgrade-worker:ci -un)"
+          echo "image runs as: $user"
+          test "$user" != "root"
+
+      - name: Confirm no build toolchain survived into the runtime image
+        run: |
+          # A compiler or test runner inside a container that unpacks hostile
+          # archives is exactly the kind of thing to leave out.
+          if docker run --rm --entrypoint sh mcp-upgrade-worker:ci -c \
+             'ls node_modules/.bin/tsc node_modules/.bin/vitest' 2>/dev/null; then
+            echo "build tooling is present in the runtime image"
+            exit 1
+          fi
+          echo "no build tooling present"
+
+      - name: Confirm the hostile archive fixtures were not shipped
+        run: |
+          if docker run --rm --entrypoint sh mcp-upgrade-worker:ci -c \
+             'ls apps/worker/test' 2>/dev/null; then
+            echo "test fixtures are present in the runtime image"
+            exit 1
+          fi
+          echo "no test fixtures present"
+
+  # ---------------------------------------------------------------------------
+  # Supply chain and secrets.
+  # ---------------------------------------------------------------------------
+  audit:
+    name: Dependency audit and secret scan
     runs-on: ubuntu-latest
     timeout-minutes: 10
 

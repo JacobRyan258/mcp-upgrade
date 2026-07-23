@@ -8,6 +8,12 @@
  * reachable through this module by accident.
  */
 export {
+  DEFAULT_TARGET_VERSION,
+  BASELINE_PROTOCOL_VERSION,
+  TARGET_IS_RELEASE_CANDIDATE,
+} from './target.js';
+
+export {
   PLANS,
   DEFAULT_PLAN_ID,
   isPlanId,

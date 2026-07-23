@@ -1,0 +1,62 @@
+# Local development stack.
+#
+#   docker compose up -d db      start Postgres only (what the tests need)
+#   docker compose up            start Postgres and the worker
+#
+# The web application runs outside compose with `npm run dev:web`, because Next's
+# development server is far more useful with direct filesystem access.
+
+services:
+  db:
+    # Matches the Postgres major version Supabase runs, so behaviour differences
+    # show up locally rather than on deploy.
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: mcp_upgrade_test
+    ports:
+      # Deliberately not 5432: this must never collide with a real local
+      # Postgres holding data somebody cares about.
+      - '127.0.0.1:55432:5432'
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d mcp_upgrade_test']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/mcp_upgrade_test
+      WORKER_SHARED_SECRET: ${WORKER_SHARED_SECRET:?set WORKER_SHARED_SECRET in .env}
+      SUPABASE_URL: ${SUPABASE_URL:?set SUPABASE_URL in .env}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?set SUPABASE_SERVICE_ROLE_KEY in .env}
+      SUPABASE_UPLOAD_BUCKET: ${SUPABASE_UPLOAD_BUCKET:-scan-uploads}
+      SCAN_TEMP_ROOT: /scans
+      WORKER_ID: worker-local
+    ports:
+      - '127.0.0.1:8080:8080'
+    # The container writes only to /scans. Everything else is read-only, which
+    # is the same posture production should run with.
+    read_only: true
+    tmpfs:
+      - /scans:mode=0700,size=2g
+      - /tmp:mode=1777,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 2g
+    pids_limit: 256
+
+volumes:
+  db-data:

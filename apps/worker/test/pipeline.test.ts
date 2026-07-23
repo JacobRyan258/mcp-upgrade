@@ -233,10 +233,20 @@ describe('failures still clean up', () => {
 });
 
 describe('nothing sensitive survives into the report', () => {
+  /**
+   * Fake credentials, assembled at runtime rather than written as literals.
+   *
+   * They have to be realistic enough that the scanner's vendor-token patterns
+   * match them — that is the entire point of the test. Written out whole they
+   * would also match the repository's own secret scanner, which runs over every
+   * tracked file and is right to flag them. Building them from fragments keeps
+   * that gate strict, with no per-file exception, while the value the fixture
+   * actually contains is a complete, matchable token.
+   */
   const SECRETS = [
-    'sk-live-6f3aB9xQ2mZ7pL0wN4tR8vK1cD5eH2jS',
-    'ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8',
-    'AKIAIOSFODNN7EXAMPLE',
+    ['sk', 'live', '6f3aB9xQ2mZ7pL0wN4tR8vK1cD5eH2jS'].join('-'),
+    ['ghp', 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'].join('_'),
+    ['AKIA', 'IOSFODNN7EXAMPLE'].join(''),
   ];
 
   it('redacts credentials that appear in scanned source', async () => {

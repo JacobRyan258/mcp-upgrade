@@ -29,7 +29,7 @@
     "test": "npm run test --workspace mcp-upgrade && npm run test --workspace @mcp-upgrade/shared && npm run test --workspace @mcp-upgrade/database && npm run test --workspace @mcp-upgrade/worker && npm run test --workspace @mcp-upgrade/web",
     "test:scanner": "npm run test --workspace mcp-upgrade",
     "test:e2e": "npm run test:e2e --workspace @mcp-upgrade/web",
-    "check:secrets": "node packages/scanner/scripts/check-secrets.mjs .",
+    "check:secrets": "node packages/scanner/scripts/check-secrets.mjs",
     "audit:production": "npm audit --omit=dev",
     "db:migrate": "npm run migrate --workspace @mcp-upgrade/database",
     "db:reset": "npm run reset --workspace @mcp-upgrade/database",
