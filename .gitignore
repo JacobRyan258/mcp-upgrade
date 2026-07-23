@@ -2,6 +2,9 @@ node_modules/
 dist/
 build/
 coverage/
+# ...but the scanner's public "Coverage" page is a real Next.js route, not
+# test-coverage output — keep it in the tree so it doesn't 404 in production.
+!/apps/web/src/app/coverage/
 *.tgz
 .env
 .env.*
