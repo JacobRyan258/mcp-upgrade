@@ -22,9 +22,25 @@ const BASE = {
   WORKER_SHARED_SECRET: 'x'.repeat(40),
 };
 
+const MANAGED = [
+  ...Object.keys(BASE),
+  'NODE_ENV',
+  'STRIPE_SECRET_KEY',
+  'STRIPE_WEBHOOK_SECRET',
+  'STRIPE_PRO_MONTHLY_PRICE_ID',
+  'NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY',
+  'VERCEL_ENV',
+  'DEPLOY_ENV',
+];
+
 function configure(overrides: Record<string, string | undefined>): void {
   resetEnvCache();
   resetStripeCache();
+  // The deployment-environment signals decide whether a live key is permitted,
+  // so they are cleared before every configuration and only set by a test that
+  // means to — a leaked VERCEL_ENV would silently change what the guard allows.
+  delete process.env.VERCEL_ENV;
+  delete process.env.DEPLOY_ENV;
   for (const [key, value] of Object.entries({ ...BASE, ...overrides })) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -36,7 +52,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  for (const key of [...Object.keys(BASE), 'NODE_ENV', 'STRIPE_SECRET_KEY']) delete process.env[key];
+  for (const key of MANAGED) delete process.env[key];
   resetEnvCache();
   resetStripeCache();
 });
@@ -73,20 +89,24 @@ describe('the billing page test-mode banner', () => {
   });
 });
 
-describe('the production live-key guard', () => {
-  it('refuses a live secret key', () => {
+describe('the live-key guard on getStripe', () => {
+  // A live key is permitted only on a real production deployment. NODE_ENV
+  // alone does not establish that — a Vercel Preview build and a local
+  // `next start` both run with NODE_ENV=production — so the guard reads the
+  // deployment signal (VERCEL_ENV) rather than trusting NODE_ENV.
+  it('refuses a live secret key outside a production deployment', () => {
     configure({ NODE_ENV: 'production', STRIPE_SECRET_KEY: 'sk_live_abc' });
     expect(() => getStripe()).toThrow(/test mode only/);
   });
 
-  it('refuses a live restricted key', () => {
+  it('refuses a live restricted key outside a production deployment', () => {
     configure({ NODE_ENV: 'production', STRIPE_SECRET_KEY: 'rk_live_abc' });
     expect(() => getStripe()).toThrow(/test mode only/);
   });
 
   it('refuses a credential it cannot classify rather than allowing it', () => {
     configure({ NODE_ENV: 'production', STRIPE_SECRET_KEY: 'totally-made-up' });
-    expect(() => getStripe()).toThrow(/test mode only/);
+    expect(() => getStripe()).toThrow(/not a recognised test-mode or live-mode Stripe key/);
   });
 
   it('allows a restricted test key', () => {
@@ -94,14 +114,34 @@ describe('the production live-key guard', () => {
     expect(() => getStripe()).not.toThrow();
   });
 
-  it('does not apply outside production, so local experiments still work', () => {
+  it('refuses a live key on a Preview deployment', () => {
+    configure({ NODE_ENV: 'production', VERCEL_ENV: 'preview', STRIPE_SECRET_KEY: 'rk_live_abc' });
+    expect(() => getStripe()).toThrow(/test mode only/);
+  });
+
+  it('refuses a live key in local development, where it used to be waved through', () => {
     configure({ NODE_ENV: 'development', STRIPE_SECRET_KEY: 'sk_live_abc' });
+    expect(() => getStripe()).toThrow(/test mode only/);
+  });
+
+  it('permits a live restricted key on a production deployment', () => {
+    configure({ NODE_ENV: 'production', VERCEL_ENV: 'production', STRIPE_SECRET_KEY: 'rk_live_abc' });
+    expect(() => getStripe()).not.toThrow();
+  });
+
+  it('permits a live secret key on a production deployment', () => {
+    configure({ NODE_ENV: 'production', VERCEL_ENV: 'production', STRIPE_SECRET_KEY: 'sk_live_abc' });
+    expect(() => getStripe()).not.toThrow();
+  });
+
+  it('honours DEPLOY_ENV=production as the non-Vercel escape hatch', () => {
+    configure({ NODE_ENV: 'production', DEPLOY_ENV: 'production', STRIPE_SECRET_KEY: 'rk_live_abc' });
     expect(() => getStripe()).not.toThrow();
   });
 });
 
 describe('the startup environment assertion', () => {
-  it('refuses to start a production server holding a live restricted key', () => {
+  it('refuses to start a non-production deployment holding a live restricted key', () => {
     configure({ NODE_ENV: 'production', STRIPE_SECRET_KEY: 'rk_live_abc' });
     expect(() => assertEnvironment()).toThrow(/live-mode restricted key/);
   });
@@ -113,7 +153,7 @@ describe('the startup environment assertion', () => {
 
   it('refuses an unclassifiable value rather than assuming it is harmless', () => {
     configure({ NODE_ENV: 'production', STRIPE_SECRET_KEY: 'oops-pasted-the-wrong-thing' });
-    expect(() => assertEnvironment()).toThrow(/does not begin with sk_test_ or rk_test_/);
+    expect(() => assertEnvironment()).toThrow(/not a recognised Stripe secret or restricted key/);
   });
 
   // The assertion used to return early unless NODE_ENV was production, which
@@ -124,10 +164,27 @@ describe('the startup environment assertion', () => {
     expect(() => assertEnvironment()).toThrow(/live-mode secret key/);
   });
 
+  it('refuses a live key on a Preview deployment', () => {
+    configure({ NODE_ENV: 'production', VERCEL_ENV: 'preview', STRIPE_SECRET_KEY: 'rk_live_abc' });
+    expect(() => assertEnvironment()).toThrow(/live-mode restricted key/);
+  });
+
   it('passes with a test key, and with no Stripe configuration at all', () => {
     configure({ NODE_ENV: 'production', STRIPE_SECRET_KEY: 'sk_test_abc' });
     expect(() => assertEnvironment()).not.toThrow();
     configure({ NODE_ENV: 'production', STRIPE_SECRET_KEY: undefined });
+    expect(() => assertEnvironment()).not.toThrow();
+  });
+
+  it('accepts a full live configuration on a production deployment', () => {
+    configure({
+      NODE_ENV: 'production',
+      VERCEL_ENV: 'production',
+      STRIPE_SECRET_KEY: 'rk_live_abc',
+      STRIPE_WEBHOOK_SECRET: 'whsec_live',
+      STRIPE_PRO_MONTHLY_PRICE_ID: 'price_live',
+      NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: 'pk_live_abc',
+    });
     expect(() => assertEnvironment()).not.toThrow();
   });
 });

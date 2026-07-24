@@ -132,6 +132,26 @@ function isHostedDeployment(): boolean {
 }
 
 /**
+ * Whether a live-mode Stripe credential is permitted in this environment.
+ *
+ * Live mode is confined to a real Vercel *production* deployment. A Preview
+ * deployment, a local `next start`, local dev and the test runner are all test
+ * mode, so a live credential pasted anywhere but production is refused rather
+ * than used — which is what keeps "only Vercel Production moves to live" from
+ * depending on nobody making a mistake. Vercel sets `VERCEL_ENV` to exactly
+ * `production` on production deployments; `DEPLOY_ENV` is the escape hatch for
+ * any other host.
+ *
+ * Deriving this from the environment rather than from the key is deliberate: the
+ * key still decides the mode everywhere downstream (the webhook handler, the
+ * startup price check, the billing banner all read the key), and this is the one
+ * gate that says a live key may only take effect where it is meant to.
+ */
+export function liveStripeModePermitted(): boolean {
+  return (process.env.VERCEL_ENV ?? process.env.DEPLOY_ENV) === 'production';
+}
+
+/**
  * Validates everything at once.
  *
  * Called from `instrumentation.ts` so a misconfigured deployment fails when the
@@ -151,12 +171,15 @@ export function assertEnvironment(): void {
   // The check is on "is positively test mode", not "is not sk_live_". A
   // restricted live key (`rk_live_`) is a live credential, and a truncated or
   // malformed value is not something to give the benefit of the doubt to.
-  const problems = validateStripeConfig({
-    publishableKey: publicEnv.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY,
-    secretKey: env.STRIPE_SECRET_KEY,
-    webhookSecret: env.STRIPE_WEBHOOK_SECRET,
-    priceId: env.STRIPE_PRO_MONTHLY_PRICE_ID,
-  });
+  const problems = validateStripeConfig(
+    {
+      publishableKey: publicEnv.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY,
+      secretKey: env.STRIPE_SECRET_KEY,
+      webhookSecret: env.STRIPE_WEBHOOK_SECRET,
+      priceId: env.STRIPE_PRO_MONTHLY_PRICE_ID,
+    },
+    { allowLiveMode: liveStripeModePermitted() },
+  );
   if (problems.length > 0) {
     throw new Error(`Stripe configuration is invalid:\n${problems.map((p) => `  ${p}`).join('\n')}`);
   }

@@ -54,10 +54,8 @@ export async function audit(options: AuditOptions): Promise<AuditReport> {
 
   add(
     'credential mode',
-    options.mode === 'test' ? 'pass' : 'warn',
-    options.mode === 'test'
-      ? 'test-mode credential'
-      : 'LIVE-mode credential — the hosted application refuses to start with one',
+    'pass',
+    options.mode === 'test' ? 'test-mode credential' : 'live-mode credential',
   );
 
   const price = await auditPriceAndProduct(options, add);
