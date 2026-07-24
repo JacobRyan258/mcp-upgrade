@@ -42,7 +42,12 @@ export {
   isPriceId,
   validateStripeConfig,
 } from './stripe-keys.js';
-export type { StripeKeyMode, StripeKeyKind, StripeConfigInput } from './stripe-keys.js';
+export type {
+  StripeKeyMode,
+  StripeKeyKind,
+  StripeConfigInput,
+  ValidateStripeConfigOptions,
+} from './stripe-keys.js';
 
 export { HANDLED_EVENTS, isHandledEvent } from './stripe-events.js';
 export type { HandledEvent } from './stripe-events.js';

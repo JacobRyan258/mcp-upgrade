@@ -7,8 +7,8 @@
  * parse.
  */
 import Stripe from 'stripe';
-import { isTestModeKey, stripeKeyMode } from '@mcp-upgrade/shared';
-import { readServerEnv } from '../env';
+import { describeStripeKey, isTestModeKey, stripeKeyMode } from '@mcp-upgrade/shared';
+import { liveStripeModePermitted, readServerEnv } from '../env';
 
 let cached: Stripe | null = null;
 
@@ -18,13 +18,26 @@ export function getStripe(): Stripe {
   if (!env.STRIPE_SECRET_KEY) {
     throw new Error('STRIPE_SECRET_KEY is not configured.');
   }
-  // Restricted keys (`rk_live_`) are live-mode credentials too, and are the
-  // credential this application is meant to be deployed with. Checking only for
-  // `sk_live_` let the recommended key straight through the guard.
-  if (env.NODE_ENV === 'production' && stripeKeyMode(env.STRIPE_SECRET_KEY) !== 'test') {
+  // The mode comes from the key itself — restricted keys (`rk_live_`) are
+  // live-mode credentials too, so a check for `sk_live_` alone would wave the
+  // recommended key straight through. An unrecognised value is refused rather
+  // than tried.
+  const mode = stripeKeyMode(env.STRIPE_SECRET_KEY);
+  if (mode === 'unknown') {
     throw new Error(
-      'Refusing to use a Stripe key that is not positively identified as test mode. ' +
-        'This deployment is configured for test mode only.',
+      'STRIPE_SECRET_KEY is not a recognised test-mode or live-mode Stripe key. ' +
+        'Refusing to use a credential whose mode cannot be established.',
+    );
+  }
+  // A live key is permitted only on a real production deployment. Everywhere
+  // else — a Preview deployment, a local production build, local dev, the test
+  // runner — a live credential is refused rather than used, so a key pasted into
+  // the wrong environment can never take a real payment. This is the single gate
+  // on *where* a live key may run; the mode itself is still the key's.
+  if (mode === 'live' && !liveStripeModePermitted()) {
+    throw new Error(
+      `Refusing to use a ${describeStripeKey(env.STRIPE_SECRET_KEY)} outside a production ` +
+        'deployment. This environment is test mode only.',
     );
   }
   cached = new Stripe(env.STRIPE_SECRET_KEY, {

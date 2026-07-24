@@ -31,7 +31,16 @@ const VALID = {
   priceId: 'price_abc',
 };
 
-describe('live-mode credentials are refused', () => {
+const VALID_LIVE = {
+  publishableKey: 'pk_live_abc',
+  secretKey: 'rk_live_abc',
+  webhookSecret: 'whsec_abcdef',
+  priceId: 'price_abc',
+};
+
+describe('live-mode credentials are refused by default', () => {
+  // The default is test mode: any caller that has not positively established it
+  // is running on a production deployment gets the safe answer.
   it('rejects a live secret key', () => {
     expect(validateStripeConfig({ ...VALID, secretKey: 'sk_live_abc' }).join('\n')).toMatch(
       /live-mode secret key/,
@@ -52,6 +61,52 @@ describe('live-mode credentials are refused', () => {
 
   it('accepts a restricted test key', () => {
     expect(validateStripeConfig({ ...VALID, secretKey: 'rk_test_abc' })).toEqual([]);
+  });
+
+  it('rejects a whole live configuration when allowLiveMode is not passed', () => {
+    expect(validateStripeConfig(VALID_LIVE).join('\n')).toMatch(/test mode only/);
+  });
+});
+
+describe('live-mode credentials on a production deployment (allowLiveMode)', () => {
+  it('accepts a live restricted key with a live publishable key', () => {
+    expect(validateStripeConfig(VALID_LIVE, { allowLiveMode: true })).toEqual([]);
+  });
+
+  it('accepts a live secret key with a live publishable key', () => {
+    expect(
+      validateStripeConfig({ ...VALID_LIVE, secretKey: 'sk_live_abc' }, { allowLiveMode: true }),
+    ).toEqual([]);
+  });
+
+  it('still rejects a live secret key paired with a test publishable key', () => {
+    // Permitting live mode does not permit a mismatched pair: a live secret with
+    // a test publishable key would take real payments while loading test Stripe.js.
+    expect(
+      validateStripeConfig(
+        { ...VALID_LIVE, publishableKey: 'pk_test_abc' },
+        { allowLiveMode: true },
+      ).join('\n'),
+    ).toMatch(/live mode but NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY is test mode/);
+  });
+
+  it('still rejects a webhook endpoint id in place of the signing secret', () => {
+    expect(
+      validateStripeConfig(
+        { ...VALID_LIVE, webhookSecret: 'we_1SyntheticEndpointIdFixture' },
+        { allowLiveMode: true },
+      ).join('\n'),
+    ).toMatch(/webhook endpoint id/);
+  });
+
+  it('still requires the price id to have the price_ prefix', () => {
+    expect(
+      validateStripeConfig({ ...VALID_LIVE, priceId: 'prod_abc' }, { allowLiveMode: true }).join('\n'),
+    ).toMatch(/must begin with price_/);
+  });
+
+  it('accepts a test-mode configuration too — live is permitted, not required', () => {
+    expect(validateStripeConfig(VALID, { allowLiveMode: true })).toEqual([]);
   });
 });
 

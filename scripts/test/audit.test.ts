@@ -143,6 +143,39 @@ describe('catching a broken account', () => {
   });
 });
 
+describe('a correctly provisioned live-mode account', () => {
+  it('passes the credential-mode check rather than warning, and warns about nothing', async () => {
+    // The live launch requires `stripe:verify -- --live` to report zero
+    // warnings; a live credential is the intended input to that command, not a
+    // condition to warn about. This is the check that makes that possible.
+    const fake = new FakeStripe({ livemode: true, account: 'acct_live_fake' });
+    await provision({
+      gateway: fake,
+      mode: 'live',
+      webhookUrls: [URL],
+      portalBaseUrl: BASE,
+      configurePortal: true,
+    });
+    fake.writes.length = 0;
+
+    const report = await audit({
+      gateway: fake,
+      mode: 'live',
+      webhookUrls: [URL],
+      configuredPortal: true,
+      portalBaseUrl: BASE,
+      envPriceId: fake.prices[0]!.id,
+      envSource: 'the process environment',
+    });
+
+    expect(check(report, 'credential mode')).toBe('pass');
+    expect(report.ok).toBe(true);
+    expect(report.checks.filter((entry) => entry.status === 'warn')).toEqual([]);
+    // Read-only: verification must never write, in any mode.
+    expect(fake.writes).toEqual([]);
+  });
+});
+
 describe('warnings that do not fail the run', () => {
   it('warns rather than fails about extra events on the endpoint', async () => {
     const fake = await provisioned();

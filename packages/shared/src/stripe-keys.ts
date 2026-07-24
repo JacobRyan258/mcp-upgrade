@@ -148,6 +148,24 @@ export interface StripeConfigInput {
   priceId?: string | null;
 }
 
+export interface ValidateStripeConfigOptions {
+  /**
+   * Whether a live-mode credential is permitted.
+   *
+   * Defaults to `false`, which is the only safe default: a caller that has not
+   * positively established it is running on a production deployment is treated
+   * as test mode, so a live key pasted into local development, a Preview build
+   * or the test runner is refused rather than used. The hosted application sets
+   * this to true only on a real Vercel production deployment.
+   *
+   * Passing it does not weaken any other check — a live secret key still has to
+   * agree with a live publishable key, and the price still has to resolve
+   * against Stripe. It only decides whether "this credential is live mode" is by
+   * itself a reason to refuse.
+   */
+  allowLiveMode?: boolean;
+}
+
 /**
  * Every static problem with a Stripe configuration, as human-readable strings.
  *
@@ -161,7 +179,11 @@ export interface StripeConfigInput {
  * Returns an empty array when the configuration is entirely absent: billing is
  * optional, and "not configured" is a supported state rather than an error.
  */
-export function validateStripeConfig(input: StripeConfigInput): string[] {
+export function validateStripeConfig(
+  input: StripeConfigInput,
+  options: ValidateStripeConfigOptions = {},
+): string[] {
+  const allowLiveMode = options.allowLiveMode ?? false;
   const problems: string[] = [];
   const present = [input.publishableKey, input.secretKey, input.webhookSecret, input.priceId].filter(
     (value) => typeof value === 'string' && value !== '',
@@ -170,26 +192,34 @@ export function validateStripeConfig(input: StripeConfigInput): string[] {
 
   if (input.secretKey) {
     const mode = stripeKeyMode(input.secretKey);
-    if (mode === 'live') {
+    if (mode === 'unknown') {
       problems.push(
-        `STRIPE_SECRET_KEY is a ${describeStripeKey(input.secretKey)}. This application is test mode only.`,
-      );
-    } else if (mode === 'unknown') {
-      problems.push(
-        'STRIPE_SECRET_KEY does not begin with sk_test_ or rk_test_. A publishable key (pk_) ' +
+        'STRIPE_SECRET_KEY is not a recognised Stripe secret or restricted key ' +
+          '(expected sk_test_, rk_test_, sk_live_ or rk_live_). A publishable key (pk_) ' +
           'cannot be used here, and a truncated value is refused rather than tried.',
+      );
+    } else if (mode === 'live' && !allowLiveMode) {
+      problems.push(
+        `STRIPE_SECRET_KEY is a ${describeStripeKey(input.secretKey)}. Live-mode credentials ` +
+          'are permitted only on a production deployment; this environment is test mode only.',
       );
     }
   }
 
   if (input.publishableKey) {
-    if (input.publishableKey.startsWith('pk_live_')) {
+    const publishableMode = input.publishableKey.startsWith('pk_test_')
+      ? 'test'
+      : input.publishableKey.startsWith('pk_live_')
+        ? 'live'
+        : 'unknown';
+    if (publishableMode === 'unknown') {
+      problems.push('NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY must begin with pk_test_ or pk_live_.');
+    } else if (publishableMode === 'live' && !allowLiveMode) {
       problems.push(
         'NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY is a live-mode publishable key. It is inlined into ' +
-          'the browser bundle at build time, so this would ship live-mode Stripe.js to every visitor.',
+          'the browser bundle at build time, so a non-production build would ship live-mode ' +
+          'Stripe.js to every visitor.',
       );
-    } else if (!input.publishableKey.startsWith('pk_test_')) {
-      problems.push('NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY must begin with pk_test_.');
     }
   }
 
