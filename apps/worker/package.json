@@ -23,7 +23,7 @@
     "@mcp-upgrade/shared": "*",
     "mcp-upgrade": "*",
     "pg": "^8.22.0",
-    "undici": "^7.28.0",
+    "undici": "^8.9.0",
     "yauzl": "^3.4.0",
     "zod": "^4.4.3"
   },
